@@ -33,9 +33,11 @@ app = typer.Typer(help="handoff: multi-agent orchestration CLI", no_args_is_help
 daemon_app = typer.Typer(help="Manage the handoff daemon")
 proxy_app = typer.Typer(help="Manage the local mitmproxy")
 brain_app = typer.Typer(help="Edit / view the project brain")
+critic_app = typer.Typer(help="Run the cheap-worker / expensive-critic loop")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(proxy_app, name="proxy")
 app.add_typer(brain_app, name="brain")
+app.add_typer(critic_app, name="critic")
 
 console = Console()
 
@@ -388,6 +390,95 @@ def brain_append(
 
 
 # --- discover (one-shot ps scan) -----------------------------------------
+
+
+@app.command()
+def attach(
+    pid: int = typer.Argument(..., help="PID of the agent process to register"),
+    kind: str = typer.Option(..., help="claude | codex | copilot | cursor"),
+    project: Path = typer.Option(Path.cwd(), help="Project root"),
+) -> None:
+    """Register an already-running agent so the daemon tracks it."""
+    _rpc("register_project", root=str(project.resolve()))
+    res = _rpc("attach_agent", kind=kind, pid=pid)
+    console.print(
+        f"[green]attached[/green] {kind} pid={pid} agent_id={res['agent_id']}"
+    )
+
+
+@app.command(name="handoff")
+def handoff_now(
+    to_kind: str = typer.Argument(..., help="Agent kind to hand off to"),
+    from_agent: Optional[int] = typer.Option(
+        None, "--from", help="agent_id of the failing agent (optional)"
+    ),
+    reason: str = typer.Option("manual", help="Reason logged for the handoff"),
+    no_spawn: bool = typer.Option(False, help="Snapshot only; don't spawn the new agent"),
+    project: Path = typer.Option(Path.cwd(), help="Project root"),
+) -> None:
+    """Snapshot context and (optionally) spawn the next agent."""
+    _rpc("register_project", root=str(project.resolve()))
+    res = _rpc(
+        "handoff",
+        from_agent_id=from_agent,
+        to_kind=to_kind,
+        reason=reason,
+        auto_spawn=not no_spawn,
+    )
+    console.print(f"[green]handoff[/green] -> {to_kind}")
+    console.print(f"  snapshot: {res.get('snapshot_path')}")
+    if res.get("to_agent_id"):
+        console.print(
+            f"  spawned agent_id={res['to_agent_id']} pid={res.get('to_pid')}"
+        )
+    else:
+        console.print("  [dim]no agent spawned[/dim]")
+
+
+@critic_app.command("run")
+def critic_run(
+    task: str = typer.Argument(..., help="Task description for the worker model"),
+    project: Path = typer.Option(Path.cwd(), help="Project root"),
+    worker_model: str = typer.Option("claude-haiku-4-5-20251001"),
+    critic_model: str = typer.Option("claude-opus-4-7"),
+    no_proxy: bool = typer.Option(
+        False, help="Don't route through the local proxy (skips usage tracking)"
+    ),
+) -> None:
+    """One-shot critic loop: worker drafts a diff, critic reviews."""
+    from handoff.critic.runner import CriticRunner
+
+    proxy = None if no_proxy else f"http://{PROXY_HOST}:{PROXY_PORT}"
+    runner = CriticRunner(
+        project.resolve(),
+        worker_model=worker_model,
+        critic_model=critic_model,
+        proxy_url=proxy,
+    )
+    result = runner.run(task)
+
+    color = "green" if result.verdict == "approve" else "yellow"
+    console.print(f"[{color}]verdict:[/{color}] {result.verdict}")
+    console.print(f"notes: {result.notes}")
+    console.print(
+        f"tokens: worker={result.worker_tokens} critic={result.critic_tokens}"
+    )
+    for p in result.artifacts:
+        console.print(f"  wrote {p}")
+
+    try:
+        _rpc(
+            "record_critic_run",
+            worker_model=worker_model,
+            critic_model=critic_model,
+            worker_tokens=result.worker_tokens,
+            critic_tokens=result.critic_tokens,
+            verdict=result.verdict,
+            notes=result.notes,
+        )
+    except typer.Exit:
+        # Daemon down is not fatal for a one-shot run.
+        pass
 
 
 @app.command()

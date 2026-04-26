@@ -14,7 +14,7 @@ venv/
 htmlcov/
 
 # handoff runtime data
-.handoff/derived/
+.handoff/
 ~/.handoff/
 *.db
 *.db-journal

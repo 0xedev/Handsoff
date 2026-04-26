@@ -12,7 +12,15 @@ Multi-agent orchestration CLI for AI coding agents (Claude Code, Codex CLI, Copi
 
 ## Status
 
-v0.1 scaffold. See `/root/.claude/plans/i-m-thinking-of-building-eventual-dijkstra.md` for the full plan.
+v0.2 scaffold. See `/root/.claude/plans/i-m-thinking-of-building-eventual-dijkstra.md` for the full plan.
+
+What works:
+- detect, meter, share-context (v0.1)
+- automatic failover when an agent's rate-limit headers cross thresholds (per-project `config.toml`)
+- manual `handoff handoff <to-kind>` for snapshot + spawn
+- `handoff attach <pid>` to register an already-running agent
+- Copilot request counting (200 vs 429) since GitHub doesn't expose token budgets
+- `handoff critic run "<task>"` — Haiku worker drafts a diff, Opus critic reviews, both routed through the local proxy so usage shows up in `handoff agents`
 
 ## Quick start
 
@@ -23,6 +31,7 @@ handoff daemon start
 handoff proxy start          # follow CA-install prompt
 handoff spawn claude -- "summarize this repo"
 handoff agents               # live table of agents + remaining tokens
+handoff critic run "add a /version endpoint"   # worker+critic, proxied
 ```
 
 ## Architecture

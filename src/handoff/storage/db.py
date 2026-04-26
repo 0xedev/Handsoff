@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS critic_runs (
     verdict         TEXT,
     notes           TEXT
 );
+
+-- v0.2: Copilot has no per-request rate-limit headers, so we track raw
+-- request + 429 counts per agent for any provider where parse_headers()
+-- returns None.
+CREATE TABLE IF NOT EXISTS request_counts (
+    agent_id        INTEGER PRIMARY KEY REFERENCES agents(id),
+    total           INTEGER NOT NULL DEFAULT 0,
+    rate_limited    INTEGER NOT NULL DEFAULT 0,
+    last_request_at INTEGER,
+    last_429_at     INTEGER
+);
 """
 
 
@@ -173,6 +184,84 @@ class Database:
             (agent_id,),
         )
         return cur.fetchone()
+
+    def bump_request_count(self, agent_id: int, status_code: int) -> None:
+        now = int(time.time())
+        is_429 = 1 if status_code == 429 else 0
+        self._conn.execute(
+            "INSERT INTO request_counts(agent_id, total, rate_limited, last_request_at, last_429_at) "
+            "VALUES(?, 1, ?, ?, ?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET "
+            "  total = total + 1, "
+            "  rate_limited = rate_limited + excluded.rate_limited, "
+            "  last_request_at = excluded.last_request_at, "
+            "  last_429_at = COALESCE(excluded.last_429_at, last_429_at)",
+            (agent_id, is_429, now, now if is_429 else None),
+        )
+
+    def request_count_for_agent(self, agent_id: int) -> Optional[sqlite3.Row]:
+        cur = self._conn.execute(
+            "SELECT * FROM request_counts WHERE agent_id=?", (agent_id,)
+        )
+        return cur.fetchone()
+
+    def project_root(self, project_id: int) -> Optional[str]:
+        cur = self._conn.execute(
+            "SELECT root_path FROM projects WHERE id=?", (project_id,)
+        )
+        row = cur.fetchone()
+        return row["root_path"] if row else None
+
+    def project_id_for_agent(self, agent_id: int) -> Optional[int]:
+        cur = self._conn.execute(
+            "SELECT project_id FROM agents WHERE id=?", (agent_id,)
+        )
+        row = cur.fetchone()
+        return row["project_id"] if row else None
+
+    def insert_handoff(
+        self,
+        *,
+        from_agent_id: Optional[int],
+        to_agent_id: Optional[int],
+        reason: str,
+        snapshot_path: Optional[str] = None,
+    ) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO handoffs(from_agent_id, to_agent_id, reason, ts, context_snapshot_path) "
+            "VALUES(?, ?, ?, ?, ?) RETURNING id",
+            (from_agent_id, to_agent_id, reason, int(time.time()), snapshot_path),
+        )
+        return cur.fetchone()["id"]
+
+    def insert_critic_run(
+        self,
+        *,
+        project_id: int,
+        worker_model: str,
+        critic_model: str,
+        worker_tokens: Optional[int],
+        critic_tokens: Optional[int],
+        verdict: str,
+        notes: Optional[str],
+    ) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO critic_runs("
+            "project_id, ts, worker_model, critic_model, "
+            "worker_tokens, critic_tokens, verdict, notes"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            (
+                project_id,
+                int(time.time()),
+                worker_model,
+                critic_model,
+                worker_tokens,
+                critic_tokens,
+                verdict,
+                notes,
+            ),
+        )
+        return cur.fetchone()["id"]
 
     def close(self) -> None:
         self._conn.close()
