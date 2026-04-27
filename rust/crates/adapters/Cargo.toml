@@ -1,0 +1,14 @@
+[package]
+name = "handoff-adapters"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+handoff-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+sysinfo.workspace = true
+regex.workspace = true
+anyhow.workspace = true
+once_cell.workspace = true

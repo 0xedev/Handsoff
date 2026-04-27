@@ -19,3 +19,7 @@ htmlcov/
 *.db
 *.db-journal
 *.sock
+
+# Rust
+rust/target/
+**/*.rs.bk

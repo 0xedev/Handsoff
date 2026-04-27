@@ -1,0 +1,14 @@
+[package]
+name = "handoff-proxy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+handoff-common.workspace = true
+handoff-adapters.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

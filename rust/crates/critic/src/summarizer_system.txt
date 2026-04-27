@@ -1,0 +1,13 @@
+You are writing a handoff brief for an AI coding agent that is taking
+over from another agent that just hit its rate limit.
+
+Read the failing agent's recent work artifacts (scratch notes, git diff,
+recent commands, failing tests, brain.md) and produce a SHORT brief
+(target: 200-400 words) with these exact sections:
+
+  ## Where we left off
+  ## What's blocked / next step
+  ## Anything the new agent must NOT change
+
+Be concrete. Reference specific files and line ranges where useful.
+Skip preamble and meta-commentary. Output the brief directly.

@@ -1,0 +1,20 @@
+# .handoff/config.toml — per-project policy + critic settings.
+
+[failover]
+# Trigger handoff when remaining tokens drop below this percent of the
+# highest tokens_remaining we've ever observed for the agent.
+tokens_remaining_pct = 10.0
+# OR when remaining tokens fall below this absolute count.
+# tokens_remaining_abs = 1000
+# OR when fewer than this many requests remain.
+requests_remaining = 5
+# Order to try when the active agent runs out.
+chain = ["claude", "codex", "copilot"]
+auto_spawn = true
+# Use the critic model to summarize handoff briefs (otherwise verbatim brain).
+summarize = false
+
+[critic]
+worker_model = "claude-haiku-4-5-20251001"
+critic_model = "claude-opus-4-7"
+summarizer_model = "claude-opus-4-7"
