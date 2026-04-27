@@ -1,0 +1,17 @@
+[package]
+name = "handoff-policy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+handoff-common.workspace = true
+handoff-context.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

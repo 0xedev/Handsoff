@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cli",
+    "crates/daemon",
+    "crates/proxy",
+    "crates/context",
+    "crates/critic",
+    "crates/policy",
+    "crates/adapters",
+    "crates/storage",
+    "crates/common",
+]
+
+[workspace.package]
+version = "0.4.0-alpha"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["0xedev"]
+repository = "https://github.com/0xedev/handsoff"
+
+[workspace.dependencies]
+# Internal crates
+handoff-common = { path = "crates/common" }
+handoff-storage = { path = "crates/storage" }
+handoff-adapters = { path = "crates/adapters" }
+handoff-context = { path = "crates/context" }
+handoff-policy = { path = "crates/policy" }
+handoff-critic = { path = "crates/critic" }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# Web / HTTP
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+hyper = "1.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# System
+sysinfo = "0.31"
+dirs = "5"
+
+# Errors / logging
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Misc
+once_cell = "1"
+regex = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
