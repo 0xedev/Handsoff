@@ -77,8 +77,34 @@ mod linux {
     }
 }
 
+/// Parse `lsof -F pn -iTCP -i:<port>` output and find the PID whose socket
+/// has `peer` as its **local** endpoint. Pure function, exposed for testing
+/// on every platform (the macOS lookup just feeds in `lsof`'s real stdout).
+///
+/// On a localhost MITM connection both ends use the same ephemeral port, so
+/// we must match the row whose `n` field starts with `<peer>:<port>->...`
+/// (the agent's outbound socket), not the row whose remote endpoint matches
+/// (that's the proxy itself — the v0.4.0-alpha bug).
+#[allow(dead_code)] // Only called from #[cfg(macos)] mod and tests.
+pub(crate) fn parse_lsof_pn(stdout: &str, peer: SocketAddr) -> Option<i64> {
+    let port = peer.port();
+    let local_prefix = format!("{}:{port}->", peer.ip());
+    let mut current_pid: Option<i64> = None;
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            current_pid = rest.parse::<i64>().ok();
+        } else if let Some(addrs) = line.strip_prefix('n') {
+            if addrs.starts_with(&local_prefix) {
+                return current_pid;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use super::parse_lsof_pn;
     use std::net::SocketAddr;
     use std::process::Command;
 
@@ -92,19 +118,7 @@ mod macos {
             return None;
         }
         let stdout = String::from_utf8_lossy(&res.stdout);
-        let mut current_pid: Option<i64> = None;
-        for line in stdout.lines() {
-            if let Some(rest) = line.strip_prefix('p') {
-                current_pid = rest.parse::<i64>().ok();
-            } else if line.starts_with('n') && current_pid.is_some() {
-                let needle_a = format!("{}:{port}", peer.ip());
-                let needle_b = format!("*:{port}");
-                if line.contains(&needle_a) || line.contains(&needle_b) {
-                    return current_pid;
-                }
-            }
-        }
-        current_pid
+        parse_lsof_pn(&stdout, peer)
     }
 }
 
@@ -124,5 +138,37 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let s = super::linux::hex_v4(&addr).unwrap();
         assert_eq!(s, "0100007F:1F90");
+    }
+
+    #[test]
+    fn lsof_picks_agent_not_proxy_for_localhost_mitm() {
+        // Regression test for the v0.4.0-alpha bug: on macOS, lsof reports
+        // BOTH the agent (local=60000) and our proxy (remote=60000) when
+        // queried with -i:60000. We must return the agent's PID, not the
+        // proxy's.
+        let stdout = "p73197\nn127.0.0.1:8080->127.0.0.1:60000\np73243\nn127.0.0.1:60000->127.0.0.1:8080\n";
+        let peer: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+        assert_eq!(parse_lsof_pn(stdout, peer), Some(73243));
+    }
+
+    #[test]
+    fn lsof_returns_none_when_no_local_match() {
+        let stdout = "p100\nn127.0.0.1:8080->127.0.0.1:99999\n";
+        let peer: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+        assert_eq!(parse_lsof_pn(stdout, peer), None);
+    }
+
+    #[test]
+    fn lsof_only_matches_local_side() {
+        // The proxy's row appears first; we must skip it and pick the
+        // agent's row that follows.
+        let stdout = concat!(
+            "p100\n",
+            "n127.0.0.1:8080->127.0.0.1:54321\n", // proxy ← agent
+            "p200\n",
+            "n127.0.0.1:54321->127.0.0.1:8080\n", // agent → proxy
+        );
+        let peer: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        assert_eq!(parse_lsof_pn(stdout, peer), Some(200));
     }
 }

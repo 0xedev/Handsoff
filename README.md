@@ -16,8 +16,23 @@ Copilot CLI, Cursor / Antigravity). Single-binary Rust.
 
 ## Status
 
-v0.4.0-alpha — full Rust port. Python implementation has been removed.
-42 tests, all passing.
+v0.4.1-alpha — alpha-bugfix release.
+47 tests, all passing.
+
+**Product rule:** *handoff orchestrates local agents you already have
+installed and authenticated. It never requires a provider API key.*
+
+What's new since v0.4.0-alpha:
+- **Critic loop now drives local CLIs** (`claude -p`, `codex exec`,
+  `gh copilot suggest`). No more `ANTHROPIC_API_KEY` requirement —
+  the critic is just two more agent invocations that flow through the
+  same proxy as everything else.
+- **macOS PID attribution fix.** `lsof -i:<port>` returns both ends of
+  a localhost MITM connection; we now match by **local** endpoint so
+  the agent's PID gets recorded, not the proxy's own.
+- **`handoff spawn` headless behaviour.** Positional args after `--`
+  now invoke headless mode (`claude -p "summarize"`); no args = TUI.
+- **`handoff doctor`.** Preflight check for daemon/proxy/CA/agents.
 
 ## Quick start
 
@@ -28,11 +43,15 @@ handoff init                                    # scaffold .handoff/
 handoff daemon start                            # background daemon
 handoff proxy start                             # local MITM proxy
                                                 # (CA install prompt on first run)
-handoff spawn claude -- "summarize this repo"   # routes through the proxy
+handoff spawn claude -- "summarize this repo"   # headless: claude -p "..."
+handoff spawn claude                            # interactive TUI (no args)
 handoff agents                                  # live table of agents + tokens
 
-handoff critic run "add a /version endpoint"    # one-shot worker+critic
+handoff critic run "add a /version endpoint"    # local-CLI worker + critic
+handoff critic run "X" --worker codex --critic claude
 handoff critic watch "polish the docs"          # re-runs on file changes
+
+handoff doctor                                  # preflight check
 ```
 
 ## Architecture
@@ -114,9 +133,11 @@ auto_spawn = true
 summarize = true                  # use critic model for handoff brief
 
 [critic]
-worker_model = "claude-haiku-4-5-20251001"
-critic_model = "claude-opus-4-7"
-summarizer_model = "claude-opus-4-7"
+worker_agent     = "claude"        # local CLI: claude | codex | copilot
+critic_agent     = "claude"
+summarizer_agent = "claude"
+# v0.4.0-alpha names (worker_model / critic_model / summarizer_model)
+# are still accepted as aliases.
 ```
 
 ## Risks / open issues

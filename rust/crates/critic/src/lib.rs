@@ -1,19 +1,25 @@
-//! Cheap-worker / expensive-critic loop, full Rust port.
+//! Cheap-worker / expensive-critic loop, driven by **local agent CLIs**.
 //!
-//! Calls the Anthropic Messages API directly via `reqwest`. When configured
-//! with a `proxy_url`, all requests route through the local mitm proxy so
-//! token usage shows up in `handoff agents` like any other client.
+//! This is the core architectural rule of handoff: we never call provider
+//! APIs directly. Both the worker and the critic are local agent CLIs that
+//! the user already has installed and authenticated (`claude -p`,
+//! `codex exec`, `gh copilot suggest`, …). When the local proxy is up,
+//! their HTTPS calls flow through it and their token usage shows up in
+//! `handoff agents` like any other client — same plumbing, no second
+//! source of truth.
 //!
 //! Output: a `CriticResult` describing the verdict, plan, and diff. The
 //! caller writes artifacts to `<project>/.handoff/scratch/critic-<ts>.{md,diff}`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use regex::Regex;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tracing::debug;
 
 pub mod watch;
@@ -22,10 +28,8 @@ pub const WORKER_SYSTEM: &str = include_str!("worker_system.txt");
 pub const CRITIC_SYSTEM: &str = include_str!("critic_system.txt");
 pub const SUMMARIZER_SYSTEM: &str = include_str!("summarizer_system.txt");
 
-pub const DEFAULT_WORKER_MODEL: &str = "claude-haiku-4-5-20251001";
-pub const DEFAULT_CRITIC_MODEL: &str = "claude-opus-4-7";
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
-pub const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
+pub const DEFAULT_WORKER_AGENT: &str = "claude";
+pub const DEFAULT_CRITIC_AGENT: &str = "claude";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CriticResult {
@@ -33,41 +37,42 @@ pub struct CriticResult {
     pub plan: String,
     pub diff: String,
     pub notes: String,
-    pub worker_tokens: u64,
-    pub critic_tokens: u64,
+    pub worker_agent: String,
+    pub critic_agent: String,
     pub artifacts: Vec<String>,
 }
 
-/// Builder/runtime for one critic loop run.
 pub struct CriticRunner {
     project_root: PathBuf,
-    worker_model: String,
-    critic_model: String,
+    worker_agent: String,
+    critic_agent: String,
     proxy_url: Option<String>,
-    api_key: String,
-    /// For tests: an injected one-shot client that yields canned `(text, tokens)` per call.
-    fake: Option<FakeAsk>,
+    /// Test-only: pre-canned responses keyed by `(agent, system_kind)`.
+    /// `system_kind` is one of "worker", "critic", "summarizer".
+    fake: Option<FakeResponses>,
 }
 
-type FakeAsk = std::sync::Mutex<std::vec::IntoIter<(String, u64)>>;
+type FakeResponses = std::sync::Mutex<std::collections::VecDeque<String>>;
 
 impl CriticRunner {
+    /// Build a runner using local agent CLIs. No API key required.
     pub fn new<P: AsRef<Path>>(project_root: P) -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY not set")?;
         Ok(Self {
             project_root: project_root.as_ref().to_path_buf(),
-            worker_model: DEFAULT_WORKER_MODEL.into(),
-            critic_model: DEFAULT_CRITIC_MODEL.into(),
+            worker_agent: DEFAULT_WORKER_AGENT.into(),
+            critic_agent: DEFAULT_CRITIC_AGENT.into(),
             proxy_url: Some("http://127.0.0.1:8080".into()),
-            api_key,
             fake: None,
         })
     }
 
-    pub fn with_models(mut self, worker: impl Into<String>, critic: impl Into<String>) -> Self {
-        self.worker_model = worker.into();
-        self.critic_model = critic.into();
+    pub fn with_agents(
+        mut self,
+        worker: impl Into<String>,
+        critic: impl Into<String>,
+    ) -> Self {
+        self.worker_agent = worker.into();
+        self.critic_agent = critic.into();
         self
     }
 
@@ -76,69 +81,65 @@ impl CriticRunner {
         self
     }
 
-    /// Test-only: install a fake `_ask` that returns canned responses in order.
-    pub fn with_fake_responses(mut self, responses: Vec<(String, u64)>) -> Self {
-        self.fake = Some(std::sync::Mutex::new(responses.into_iter()));
-        self.api_key = "fake".into();
+    /// Test-only: pre-canned response queue. Each call to `ask` pops the
+    /// front of the queue.
+    pub fn with_fake_responses(mut self, responses: Vec<String>) -> Self {
+        self.fake = Some(std::sync::Mutex::new(responses.into()));
         self
     }
 
-    fn http_client(&self) -> Result<Client> {
-        let mut b = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .danger_accept_invalid_certs(true); // mitmproxy CA may not be system-trusted
-        if let Some(p) = &self.proxy_url {
-            b = b.proxy(reqwest::Proxy::all(p)?);
+    fn proxy_env(&self) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        if let Some(url) = &self.proxy_url {
+            for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                env.insert(k.into(), url.clone());
+            }
+            let ca = handoff_common::home_dir().join("ca").join("cert.pem");
+            if ca.exists() {
+                let s = ca.display().to_string();
+                env.insert("SSL_CERT_FILE".into(), s.clone());
+                env.insert("REQUESTS_CA_BUNDLE".into(), s.clone());
+                env.insert("NODE_EXTRA_CA_CERTS".into(), s);
+            }
         }
-        Ok(b.build()?)
+        env
     }
 
-    /// One-shot Anthropic Messages call. Returns (assistant_text, total_tokens).
-    async fn ask(&self, model: &str, system: &str, user: &str) -> Result<(String, u64)> {
+    /// Run an agent CLI with `system + user` as a single combined prompt
+    /// (the local CLIs don't expose a system role over their headless
+    /// flag, so we prepend the system block to the user prompt).
+    async fn ask(&self, agent: &str, system: &str, user: &str) -> Result<String> {
         if let Some(fake) = &self.fake {
-            let mut g = fake.lock().unwrap();
-            return g
-                .next()
+            let mut q = fake.lock().unwrap();
+            return q
+                .pop_front()
                 .ok_or_else(|| anyhow!("ran out of fake responses"));
         }
 
-        let client = self.http_client()?;
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 2048,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        });
-        let resp = client
-            .post(ANTHROPIC_URL)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
+        let argv = headless_argv(agent)
+            .ok_or_else(|| anyhow!("unsupported agent: {agent}"))?;
+        let prompt = format!("{system}\n\n---\n\n{user}");
+        let mut cmd = Command::new(argv[0]);
+        cmd.args(&argv[1..])
+            .arg(&prompt)
+            .current_dir(&self.project_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in self.proxy_env() {
+            cmd.env(k, v);
+        }
+        let output = cmd
+            .output()
             .await
-            .context("anthropic request failed")?;
-
-        let status = resp.status();
-        let bytes = resp.bytes().await?;
-        if !status.is_success() {
+            .with_context(|| format!("spawning {agent}"))?;
+        if !output.status.success() {
             return Err(anyhow!(
-                "anthropic {}: {}",
-                status,
-                String::from_utf8_lossy(&bytes)
+                "{agent} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
             ));
         }
-        let parsed: AnthropicResponse = serde_json::from_slice(&bytes)
-            .with_context(|| format!("decoding anthropic response: {}",
-                String::from_utf8_lossy(&bytes)))?;
-        let text = parsed
-            .content
-            .into_iter()
-            .filter_map(|b| if b.kind == "text" { Some(b.text) } else { None })
-            .collect::<Vec<_>>()
-            .join("");
-        let tokens = parsed.usage.input_tokens + parsed.usage.output_tokens;
-        Ok((text, tokens))
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Run the full worker → critic → (revise on redirect) → critic loop.
@@ -148,15 +149,15 @@ impl CriticRunner {
         let worker_prompt = format!(
             "## Project brain\n\n{brain}\n\n## Task\n\n{task}\n\nNow produce <plan> and <diff>."
         );
-        let (worker_text, mut worker_tokens) = self
-            .ask(&self.worker_model, WORKER_SYSTEM, &worker_prompt)
+        let worker_text = self
+            .ask(&self.worker_agent, WORKER_SYSTEM, &worker_prompt)
             .await?;
         let mut plan = extract(&worker_text, "plan");
         let mut diff = extract(&worker_text, "diff");
 
         let critic_prompt = make_critic_prompt(task, &plan, &diff);
-        let (critic_text, mut critic_tokens) = self
-            .ask(&self.critic_model, CRITIC_SYSTEM, &critic_prompt)
+        let critic_text = self
+            .ask(&self.critic_agent, CRITIC_SYSTEM, &critic_prompt)
             .await?;
         let (mut verdict, mut notes) = parse_verdict(&critic_text);
 
@@ -165,10 +166,9 @@ impl CriticRunner {
                 "{worker_prompt}\n\n## Critic feedback (your previous attempt was rejected)\n\
                 {notes}\n\nRevise. Produce <plan> and <diff> again."
             );
-            let (worker_text2, w2) = self
-                .ask(&self.worker_model, WORKER_SYSTEM, &revise_prompt)
+            let worker_text2 = self
+                .ask(&self.worker_agent, WORKER_SYSTEM, &revise_prompt)
                 .await?;
-            worker_tokens += w2;
             let new_plan = extract(&worker_text2, "plan");
             let new_diff = extract(&worker_text2, "diff");
             if !new_plan.is_empty() {
@@ -179,10 +179,9 @@ impl CriticRunner {
             }
 
             let critic_prompt2 = make_critic_prompt(task, &plan, &diff);
-            let (critic_text2, c2) = self
-                .ask(&self.critic_model, CRITIC_SYSTEM, &critic_prompt2)
+            let critic_text2 = self
+                .ask(&self.critic_agent, CRITIC_SYSTEM, &critic_prompt2)
                 .await?;
-            critic_tokens += c2;
             let parsed = parse_verdict(&critic_text2);
             verdict = parsed.0;
             notes = parsed.1;
@@ -194,15 +193,15 @@ impl CriticRunner {
             plan,
             diff,
             notes,
-            worker_tokens,
-            critic_tokens,
+            worker_agent: self.worker_agent.clone(),
+            critic_agent: self.critic_agent.clone(),
             artifacts,
         })
     }
 
     /// Critic-summarized handoff brief. Used by failover to replace the
     /// verbatim brain dump.
-    pub async fn summarize_for_handoff(&self, reason: &str) -> Result<(String, u64)> {
+    pub async fn summarize_for_handoff(&self, reason: &str) -> Result<String> {
         let brain = self.read_brain();
         let scratch_blob = self.gather_recent_scratch(5);
         let mut prompt = format!(
@@ -215,7 +214,7 @@ impl CriticRunner {
             ));
         }
         prompt.push_str("\nProduce the handoff brief now.");
-        self.ask(&self.critic_model, SUMMARIZER_SYSTEM, &prompt).await
+        self.ask(&self.critic_agent, SUMMARIZER_SYSTEM, &prompt).await
     }
 
     fn read_brain(&self) -> String {
@@ -263,8 +262,10 @@ impl CriticRunner {
         std::fs::create_dir_all(&scratch)?;
         let md_path = scratch.join(format!("critic-{ts}.md"));
         let md_body = format!(
-            "# Critic run {ts}\n\n## Task\n\n{task}\n\n## Verdict: {verdict}\n\n{notes}\n\n\
-            ## Plan\n\n{plan}\n\n## Diff\n\n```diff\n{diff}\n```\n"
+            "# Critic run {ts}\n\nworker = {} · critic = {}\n\n\
+            ## Task\n\n{task}\n\n## Verdict: {verdict}\n\n{notes}\n\n\
+            ## Plan\n\n{plan}\n\n## Diff\n\n```diff\n{diff}\n```\n",
+            self.worker_agent, self.critic_agent
         );
         std::fs::write(&md_path, md_body)?;
         let mut out = vec![md_path.display().to_string()];
@@ -278,6 +279,17 @@ impl CriticRunner {
             out.push(diff_path.display().to_string());
         }
         Ok(out)
+    }
+}
+
+/// Headless invocation per agent kind. Tail of argv is the prompt, which
+/// is appended at call time.
+fn headless_argv(kind: &str) -> Option<&'static [&'static str]> {
+    match kind {
+        "claude" => Some(&["claude", "-p"]),
+        "codex" => Some(&["codex", "exec"]),
+        "copilot" => Some(&["gh", "copilot", "suggest"]),
+        _ => None,
     }
 }
 
@@ -338,28 +350,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    content: Vec<AnthropicBlock>,
-    usage: AnthropicUsage,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,31 +381,31 @@ mod tests {
         assert_eq!(v, "redirect");
     }
 
+    #[test]
+    fn headless_argv_knows_supported_agents() {
+        assert!(headless_argv("claude").is_some());
+        assert!(headless_argv("codex").is_some());
+        assert!(headless_argv("copilot").is_some());
+        assert!(headless_argv("cursor").is_none());
+    }
+
     #[tokio::test]
     async fn approve_path_writes_md_and_diff() {
         let tmp = tempfile::tempdir().unwrap();
         let root = fixture_root(tmp.path());
-        let runner = CriticRunner {
-            project_root: root.clone(),
-            worker_model: "w".into(),
-            critic_model: "c".into(),
-            proxy_url: None,
-            api_key: "fake".into(),
-            fake: None,
-        }
-        .with_fake_responses(vec![
-            (
+        let runner = CriticRunner::new(&root)
+            .unwrap()
+            .with_agents("claude", "claude")
+            .with_proxy(None)
+            .with_fake_responses(vec![
                 "<plan>\n1. add greet\n</plan>\n<diff>\ndiff --git a/x.py b/x.py\n+def greet(): pass\n</diff>"
                     .into(),
-                100,
-            ),
-            (r#"{"verdict":"approve","notes":"ok"}"#.into(), 50),
-        ]);
+                r#"{"verdict":"approve","notes":"ok"}"#.into(),
+            ]);
         let res = runner.run("add a greet function").await.unwrap();
         assert_eq!(res.verdict, "approve");
         assert!(res.diff.contains("greet"));
-        assert_eq!(res.worker_tokens, 100);
-        assert_eq!(res.critic_tokens, 50);
+        assert_eq!(res.worker_agent, "claude");
         assert!(res.artifacts.iter().any(|p| p.ends_with(".md")));
         assert!(res.artifacts.iter().any(|p| p.ends_with(".diff")));
     }
@@ -424,47 +414,50 @@ mod tests {
     async fn redirect_then_approve_runs_revision() {
         let tmp = tempfile::tempdir().unwrap();
         let root = fixture_root(tmp.path());
-        let runner = CriticRunner {
-            project_root: root,
-            worker_model: "w".into(),
-            critic_model: "c".into(),
-            proxy_url: None,
-            api_key: "fake".into(),
-            fake: None,
-        }
-        .with_fake_responses(vec![
-            ("<plan>1. wrong</plan><diff>bad</diff>".into(), 10),
-            (r#"{"verdict":"redirect","notes":"wrong file"}"#.into(), 5),
-            ("<plan>1. fixed</plan><diff>better</diff>".into(), 12),
-            (r#"{"verdict":"approve","notes":"ok"}"#.into(), 6),
-        ]);
+        let runner = CriticRunner::new(&root)
+            .unwrap()
+            .with_agents("claude", "codex")
+            .with_proxy(None)
+            .with_fake_responses(vec![
+                "<plan>1. wrong</plan><diff>bad</diff>".into(),
+                r#"{"verdict":"redirect","notes":"wrong file"}"#.into(),
+                "<plan>1. fixed</plan><diff>better</diff>".into(),
+                r#"{"verdict":"approve","notes":"ok"}"#.into(),
+            ]);
         let res = runner.run("do something").await.unwrap();
         assert_eq!(res.verdict, "approve");
         assert!(res.plan.contains("fixed"));
         assert!(res.diff.contains("better"));
-        assert_eq!(res.worker_tokens, 22);
-        assert_eq!(res.critic_tokens, 11);
+        assert_eq!(res.worker_agent, "claude");
+        assert_eq!(res.critic_agent, "codex");
     }
 
     #[tokio::test]
     async fn empty_diff_skips_diff_artifact() {
         let tmp = tempfile::tempdir().unwrap();
         let root = fixture_root(tmp.path());
-        let runner = CriticRunner {
-            project_root: root,
-            worker_model: "w".into(),
-            critic_model: "c".into(),
-            proxy_url: None,
-            api_key: "fake".into(),
-            fake: None,
-        }
-        .with_fake_responses(vec![
-            ("<plan>1. explore</plan><diff></diff>".into(), 1),
-            (r#"{"verdict":"approve","notes":"nothing to do"}"#.into(), 1),
-        ]);
+        let runner = CriticRunner::new(&root)
+            .unwrap()
+            .with_agents("claude", "claude")
+            .with_proxy(None)
+            .with_fake_responses(vec![
+                "<plan>1. explore</plan><diff></diff>".into(),
+                r#"{"verdict":"approve","notes":"nothing to do"}"#.into(),
+            ]);
         let res = runner.run("explore").await.unwrap();
         assert!(res.artifacts.iter().any(|p| p.ends_with(".md")));
         assert!(!res.artifacts.iter().any(|p| p.ends_with(".diff")));
     }
-}
 
+    #[tokio::test]
+    async fn unsupported_agent_errors_clearly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_root(tmp.path());
+        let runner = CriticRunner::new(&root)
+            .unwrap()
+            .with_agents("antigravity", "claude")
+            .with_proxy(None);
+        let err = runner.run("anything").await.unwrap_err().to_string();
+        assert!(err.contains("antigravity") || err.contains("unsupported"));
+    }
+}
