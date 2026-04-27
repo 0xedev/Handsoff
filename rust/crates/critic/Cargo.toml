@@ -13,3 +13,8 @@ reqwest.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"

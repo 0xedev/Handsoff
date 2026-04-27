@@ -53,27 +53,34 @@ mod tests {
 
     fn init_repo(dir: &Path) {
         Command::new("git").args(["init", "-q"]).current_dir(dir).output().unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "t@t"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "t"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
+        for kv in [
+            ("user.email", "t@t"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+        ] {
+            Command::new("git")
+                .args(["config", kv.0, kv.1])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+        }
         std::fs::write(dir.join("a.txt"), "hello").unwrap();
         Command::new("git")
             .args(["add", "."])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        let out = Command::new("git")
             .args(["commit", "-q", "-m", "init"])
             .current_dir(dir)
             .output()
             .unwrap();
+        assert!(
+            out.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

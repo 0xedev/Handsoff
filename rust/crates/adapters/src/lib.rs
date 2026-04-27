@@ -330,7 +330,7 @@ pub fn for_kind(kind: AgentKind) -> Box<dyn Adapter> {
 pub fn snapshot_procs() -> Vec<ProcInfo> {
     use sysinfo::{ProcessesToUpdate, System};
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes(ProcessesToUpdate::All);
     sys.processes()
         .iter()
         .map(|(pid, proc)| ProcInfo {

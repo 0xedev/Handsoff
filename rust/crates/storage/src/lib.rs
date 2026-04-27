@@ -325,6 +325,37 @@ impl Database {
         )?;
         Ok(conn.last_insert_rowid())
     }
+
+    pub fn insert_critic_run(
+        &self,
+        project_id: i64,
+        worker_model: &str,
+        critic_model: &str,
+        worker_tokens: Option<u64>,
+        critic_tokens: Option<u64>,
+        verdict: &str,
+        notes: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO critic_runs(\
+             project_id, ts, worker_model, critic_model, \
+             worker_tokens, critic_tokens, verdict, notes) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                project_id,
+                now,
+                worker_model,
+                critic_model,
+                worker_tokens.map(|x| x as i64),
+                critic_tokens.map(|x| x as i64),
+                verdict,
+                notes,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
 }
 
 fn map_agent_row(row: &Row) -> rusqlite::Result<AgentRow> {

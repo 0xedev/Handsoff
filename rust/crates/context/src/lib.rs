@@ -173,14 +173,21 @@ impl ContextEngine {
         };
 
         // Persist both .json (machine) and .md (human).
+        let (md_path, _json_path) = self.write_snapshot(&snap)?;
+        Ok((snap, md_path))
+    }
+
+    /// Write a Snapshot to disk under `.handoff/scratch/handoff-<generated_at>.{md,json}`,
+    /// overwriting any existing files at those paths. Returns (md_path, json_path).
+    pub fn write_snapshot(&self, snap: &Snapshot) -> Result<(PathBuf, PathBuf)> {
         let scratch = self.handoff_dir().join("scratch");
         std::fs::create_dir_all(&scratch)?;
-        let stem = format!("handoff-{}", now);
+        let stem = format!("handoff-{}", snap.generated_at);
         let json_path = scratch.join(format!("{stem}.json"));
         let md_path = scratch.join(format!("{stem}.md"));
-        std::fs::write(&json_path, serde_json::to_string_pretty(&snap)?)?;
-        std::fs::write(&md_path, render_markdown(&snap))?;
-        Ok((snap, md_path))
+        std::fs::write(&json_path, serde_json::to_string_pretty(snap)?)?;
+        std::fs::write(&md_path, render_markdown(snap))?;
+        Ok((md_path, json_path))
     }
 }
 

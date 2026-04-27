@@ -17,7 +17,7 @@ static JEST_FAILED: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"●\s+(.+?)\s*$").unwrap());
 
 static CARGO_FAILED: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*test ([\w:]+) \.\.\. FAILED").unwrap());
+    Lazy::new(|| Regex::new(r"(?m)^\s*test ([\w:]+) \.\.\. FAILED").unwrap());
 
 pub fn failing_from_scratch(scratch_dir: &Path) -> Vec<TestFailure> {
     let path = scratch_dir.join("lasttest.txt");

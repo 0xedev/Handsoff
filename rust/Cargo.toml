@@ -27,6 +27,7 @@ handoff-storage = { path = "crates/storage" }
 handoff-adapters = { path = "crates/adapters" }
 handoff-context = { path = "crates/context" }
 handoff-policy = { path = "crates/policy" }
+handoff-critic = { path = "crates/critic" }
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }

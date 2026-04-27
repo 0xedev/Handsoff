@@ -12,3 +12,12 @@ tokio.workspace = true
 reqwest.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+
+# MITM proxy stack
+hudsucker = { version = "0.23", features = ["rustls-client", "rcgen-ca"] }
+http = "1"
+http-body-util = "0.1"
+rcgen = "0.13"
+chrono.workspace = true
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }

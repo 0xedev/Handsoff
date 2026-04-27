@@ -1,6 +1,7 @@
 //! HTTP daemon: /ingest for the proxy, /rpc for the CLI.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,11 +19,33 @@ use handoff_storage::Database;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::Sender;
 use tracing::warn;
+
+pub mod failover;
+pub mod spawn;
+
+use failover::{FailoverEngine, RateEvent};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
+    pub events: Sender<RateEvent>,
+    pub failover: Arc<FailoverEngine>,
+}
+
+impl AppState {
+    /// Build an `AppState` plus spawn the failover engine task. Returns the
+    /// state ready to mount under axum.
+    pub fn bootstrap(db: Arc<Database>, proxy_url: String) -> Self {
+        let engine = Arc::new(FailoverEngine::new(db.clone(), proxy_url));
+        let events = engine.clone().spawn();
+        AppState {
+            db,
+            events,
+            failover: engine,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +106,22 @@ async fn ingest(
         let _ = s.db.bump_request_count(aid, payload.status_code);
         if let Some(sample) = &payload.sample {
             let _ = s.db.insert_rate_sample(aid, sample);
+            let ev = RateEvent {
+                agent_id: aid,
+                kind: payload.kind.clone(),
+                tokens_remaining: sample.tokens_remaining,
+                requests_remaining: sample.requests_remaining,
+            };
+            let _ = s.events.try_send(ev);
+        } else if payload.status_code == 429 {
+            // Opaque-provider failover trigger.
+            let ev = RateEvent {
+                agent_id: aid,
+                kind: payload.kind.clone(),
+                tokens_remaining: Some(0),
+                requests_remaining: Some(0),
+            };
+            let _ = s.events.try_send(ev);
         }
     }
     (
@@ -110,10 +149,7 @@ fn resolve_agent_id(s: &AppState, payload: &IngestPayload) -> Result<Option<i64>
 }
 
 fn default_project(db: &Database) -> Result<i64> {
-    // Fall back to cwd if no project is registered yet.
-    let cwd = std::env::current_dir()?
-        .display()
-        .to_string();
+    let cwd = std::env::current_dir()?.display().to_string();
     db.upsert_project(&cwd)
 }
 
@@ -123,9 +159,16 @@ async fn rpc(State(s): State<AppState>, Json(req): Json<RpcRequest>) -> impl Int
         "register_agent" => rpc_register_agent(&s, &req.params),
         "list_agents" => rpc_list_agents(&s, &req.params),
         "stop_agent" => rpc_stop_agent(&s, &req.params),
+        "attach_agent" => rpc_attach_agent(&s, &req.params),
+        "handoff" => return Json(rpc_response(rpc_handoff(&s, req.params).await)).into_response(),
+        "record_critic_run" => rpc_record_critic_run(&s, &req.params),
         m => Err(anyhow::anyhow!("unknown method: {m}")),
     };
-    let resp = match result {
+    Json(rpc_response(result)).into_response()
+}
+
+fn rpc_response(result: Result<serde_json::Value>) -> RpcResponse {
+    match result {
         Ok(v) => RpcResponse {
             ok: true,
             result: Some(v),
@@ -136,8 +179,7 @@ async fn rpc(State(s): State<AppState>, Json(req): Json<RpcRequest>) -> impl Int
             result: None,
             error: Some(e.to_string()),
         },
-    };
-    (StatusCode::OK, Json(resp))
+    }
 }
 
 fn rpc_register_project(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Value> {
@@ -159,9 +201,107 @@ fn rpc_register_agent(s: &AppState, p: &serde_json::Value) -> Result<serde_json:
         None => default_project(&s.db)?,
     };
     let pid = p.get("pid").and_then(|v| v.as_i64());
-    let spawned_by = p.get("spawned_by").and_then(|v| v.as_str()).unwrap_or("handoff");
+    let spawned_by = p
+        .get("spawned_by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("handoff");
     let aid = s.db.insert_agent(project_id, kind, pid, spawned_by)?;
     Ok(json!({"agent_id": aid}))
+}
+
+fn rpc_attach_agent(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Value> {
+    let kind = p
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("kind required"))?;
+    let pid = p
+        .get("pid")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow::anyhow!("pid required"))?;
+    let project_id = match p.get("project_id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => default_project(&s.db)?,
+    };
+    let aid = s.db.insert_agent(project_id, kind, Some(pid), "user")?;
+    Ok(json!({"agent_id": aid, "project_id": project_id}))
+}
+
+async fn rpc_handoff(s: &AppState, p: serde_json::Value) -> Result<serde_json::Value> {
+    let to_kind = p
+        .get("to_kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("to_kind required"))?
+        .to_string();
+    let from_agent_id = p.get("from_agent_id").and_then(|v| v.as_i64());
+    let auto_spawn = p
+        .get("auto_spawn")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let reason = p
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual")
+        .to_string();
+    let project_id = match p.get("project_id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => match from_agent_id.and_then(|aid| s.db.project_id_for_agent(aid).ok().flatten()) {
+            Some(id) => id,
+            None => default_project(&s.db)?,
+        },
+    };
+    let root = s
+        .db
+        .project_root(project_id)?
+        .ok_or_else(|| anyhow::anyhow!("project_id={project_id} has no root"))?;
+    let outcome = s
+        .failover
+        .execute(
+            from_agent_id,
+            &to_kind,
+            &PathBuf::from(&root),
+            project_id,
+            &reason,
+            auto_spawn,
+        )
+        .await?;
+    Ok(json!({
+        "handoff_id": outcome.handoff_id,
+        "to_agent_id": outcome.to_agent_id,
+        "to_pid": outcome.to_pid,
+        "snapshot_path": outcome.snapshot_path,
+    }))
+}
+
+fn rpc_record_critic_run(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Value> {
+    let worker_model = p
+        .get("worker_model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("worker_model required"))?;
+    let critic_model = p
+        .get("critic_model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("critic_model required"))?;
+    let verdict = p
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("verdict required"))?;
+    let project_id = match p.get("project_id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => default_project(&s.db)?,
+    };
+    let worker_tokens = p.get("worker_tokens").and_then(|v| v.as_u64());
+    let critic_tokens = p.get("critic_tokens").and_then(|v| v.as_u64());
+    let notes = p.get("notes").and_then(|v| v.as_str());
+    let id = s.db.insert_critic_run(
+        project_id,
+        worker_model,
+        critic_model,
+        worker_tokens,
+        critic_tokens,
+        verdict,
+        notes,
+    )?;
+    Ok(json!({"critic_run_id": id}))
 }
 
 fn rpc_list_agents(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Value> {
@@ -195,7 +335,10 @@ fn rpc_stop_agent(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Val
         .get("agent_id")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| anyhow::anyhow!("agent_id required"))?;
-    let status = p.get("status").and_then(|v| v.as_str()).unwrap_or("stopped");
+    let status = p
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stopped");
     s.db.mark_agent_stopped(aid, status)?;
     Ok(json!({"ok": true}))
 }
@@ -207,8 +350,6 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// Hint to silence "unused import" when adapters list isn't referenced
-/// (kept for forthcoming endpoints).
 #[allow(dead_code)]
 fn _adapters_keepalive() -> usize {
     all_adapters().len()
