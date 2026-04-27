@@ -28,6 +28,11 @@ from handoff.context.engine import ContextEngine
 from handoff.daemon.spawn import headless_spawn
 from handoff.storage.db import Database
 
+try:
+    from handoff.critic.runner import CriticRunner
+except Exception:  # noqa: BLE001 - anthropic SDK is optional at import time
+    CriticRunner = None  # type: ignore[assignment]
+
 log = logging.getLogger("handoff.failover")
 
 
@@ -38,6 +43,8 @@ class FailoverConfig:
     requests_remaining: int = 5
     chain: tuple[str, ...] = ("claude", "codex", "copilot")
     auto_spawn: bool = True
+    summarize: bool = False  # use critic model to summarize before handoff
+    summarizer_model: str = "claude-opus-4-7"
 
 
 def load_config(project_root: Path) -> FailoverConfig:
@@ -57,6 +64,8 @@ def load_config(project_root: Path) -> FailoverConfig:
         requests_remaining=int(f.get("requests_remaining", 5)),
         chain=chain,
         auto_spawn=bool(f.get("auto_spawn", True)),
+        summarize=bool(f.get("summarize", False)),
+        summarizer_model=str(f.get("summarizer_model", "claude-opus-4-7")),
     )
 
 
@@ -161,10 +170,23 @@ class FailoverPolicy:
         project_id: int,
         reason: str,
         auto_spawn: bool = True,
+        summarize: Optional[bool] = None,
     ) -> dict:
         engine = ContextEngine(project_root)
+        cfg = load_config(project_root)
+        use_summary = cfg.summarize if summarize is None else summarize
+        brief: Optional[str] = None
+        if use_summary and CriticRunner is not None:
+            try:
+                runner = CriticRunner(
+                    project_root, critic_model=cfg.summarizer_model
+                )
+                brief, _ = runner.summarize_for_handoff(reason=reason)
+            except Exception as e:  # noqa: BLE001
+                log.warning("summarizer failed; falling back to verbatim brain: %s", e)
         snapshot = engine.snapshot(
-            note=f"Failover from agent_id={from_agent_id}: {reason}"
+            note=f"Failover from agent_id={from_agent_id}: {reason}",
+            brief=brief,
         )
 
         new_agent_id: Optional[int] = None

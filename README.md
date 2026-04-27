@@ -12,15 +12,18 @@ Multi-agent orchestration CLI for AI coding agents (Claude Code, Codex CLI, Copi
 
 ## Status
 
-v0.2 scaffold. See `/root/.claude/plans/i-m-thinking-of-building-eventual-dijkstra.md` for the full plan.
+v0.3 scaffold. See `/root/.claude/plans/i-m-thinking-of-building-eventual-dijkstra.md` for the full plan.
 
 What works:
 - detect, meter, share-context (v0.1)
-- automatic failover when an agent's rate-limit headers cross thresholds (per-project `config.toml`)
+- automatic failover with per-project `config.toml` thresholds (v0.2)
 - manual `handoff handoff <to-kind>` for snapshot + spawn
 - `handoff attach <pid>` to register an already-running agent
 - Copilot request counting (200 vs 429) since GitHub doesn't expose token budgets
 - `handoff critic run "<task>"` — Haiku worker drafts a diff, Opus critic reviews, both routed through the local proxy so usage shows up in `handoff agents`
+- **(v0.3)** `handoff critic watch` — re-runs the critic loop whenever tracked files change (mtime polling, configurable debounce)
+- **(v0.3)** critic-summarized handoff briefs — when failover fires with `summarize=true` in config, the snapshot includes a focused brief from the critic model instead of dumping the entire brain
+- **(v0.3)** VSCode / Cursor companion extension under `extension/` — TLS-pinning fallback that posts heartbeats and edit pulses to the daemon's `/ingest`
 
 ## Quick start
 

@@ -67,6 +67,21 @@ Output ONLY a single JSON object on one line:
   {"verdict": "approve" | "redirect", "notes": "<short reasoning>"}
 """
 
+SUMMARIZER_SYSTEM = """\
+You are writing a handoff brief for an AI coding agent that is taking
+over from another agent that just hit its rate limit.
+
+Read the failing agent's recent work artifacts (scratch notes, latest
+commits, brain.md) and produce a SHORT brief (target: 200-400 words):
+
+  ## Where we left off
+  ## What's blocked / next step
+  ## Anything the new agent must NOT change
+
+Be concrete. Reference specific files and line ranges where useful.
+Skip preamble and meta-commentary. Output the brief directly.
+"""
+
 PLAN_RE = re.compile(r"<plan>(.*?)</plan>", re.DOTALL)
 DIFF_RE = re.compile(r"<diff>(.*?)</diff>", re.DOTALL)
 
@@ -231,3 +246,56 @@ class CriticRunner:
             diff_path.write_text(diff if diff.endswith("\n") else diff + "\n")
             out.append(diff_path)
         return out
+
+    def summarize_for_handoff(
+        self,
+        *,
+        recent_artifacts: Optional[list[Path]] = None,
+        recent_git_log: Optional[str] = None,
+        reason: str = "rate-limit failover",
+    ) -> tuple[str, int]:
+        """Produce a focused handoff brief via the critic model.
+
+        Returns (brief_markdown, tokens_used). Caller is responsible for
+        writing it to disk; FailoverPolicy uses it in place of the verbatim
+        brain dump.
+        """
+        brain_path = self.root / ".handoff" / "brain.md"
+        brain = brain_path.read_text() if brain_path.exists() else ""
+        artifacts = list(recent_artifacts or self._gather_recent_scratch())
+        artifact_blob = self._render_artifacts(artifacts)
+
+        prompt_parts = [
+            f"## Handoff reason\n{reason}\n",
+            f"## Project brain\n{brain[:4000]}\n",
+        ]
+        if artifact_blob:
+            prompt_parts.append(f"## Recent scratch / critic notes\n{artifact_blob}\n")
+        if recent_git_log:
+            prompt_parts.append(f"## Recent commits\n{recent_git_log[:2000]}\n")
+        prompt_parts.append("Produce the handoff brief now.")
+
+        client = self._client()
+        text, used = self._ask(
+            client, self.critic_model, SUMMARIZER_SYSTEM, "\n".join(prompt_parts)
+        )
+        return text.strip(), used
+
+    def _gather_recent_scratch(self, limit: int = 5) -> list[Path]:
+        scratch = self.root / ".handoff" / "scratch"
+        if not scratch.exists():
+            return []
+        files = sorted(
+            scratch.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        return files[:limit]
+
+    def _render_artifacts(self, paths: list[Path]) -> str:
+        chunks = []
+        for p in paths:
+            try:
+                body = p.read_text()
+            except OSError:
+                continue
+            chunks.append(f"### {p.name}\n{body[:1500]}")
+        return "\n\n".join(chunks)
