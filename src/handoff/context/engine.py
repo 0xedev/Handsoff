@@ -97,17 +97,36 @@ class ContextEngine:
                 written.append(target)
         return written
 
-    def snapshot(self, note: Optional[str] = None) -> Path:
-        """Write a timestamped scratch handoff note. Used by failover."""
+    def snapshot(
+        self,
+        note: Optional[str] = None,
+        brief: Optional[str] = None,
+    ) -> Path:
+        """Write a timestamped scratch handoff note. Used by failover.
+
+        If `brief` is provided (e.g. from a critic-summarizer), it replaces
+        the verbatim brain dump. The verbatim brain is still appended below
+        for redundancy.
+        """
         ts = int(time.time())
         path = self.handoff_dir / "scratch" / f"handoff-{ts}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        body = (
-            f"# Handoff snapshot {ts}\n\n"
-            f"Automated snapshot for agent handoff.\n\n"
-            f"## Project brain (verbatim)\n\n"
-            + _strip_frontmatter(self.brain_path.read_text() if self.brain_path.exists() else "")
+        verbatim = _strip_frontmatter(
+            self.brain_path.read_text() if self.brain_path.exists() else ""
         )
+        if brief:
+            body = (
+                f"# Handoff snapshot {ts}\n\n"
+                f"Automated snapshot for agent handoff.\n\n"
+                f"## Brief (critic-summarized)\n\n{brief}\n\n"
+                f"## Project brain (verbatim, for reference)\n\n{verbatim}"
+            )
+        else:
+            body = (
+                f"# Handoff snapshot {ts}\n\n"
+                f"Automated snapshot for agent handoff.\n\n"
+                f"## Project brain (verbatim)\n\n{verbatim}"
+            )
         if note:
             body += f"\n\n## Note\n\n{note}\n"
         path.write_text(body)

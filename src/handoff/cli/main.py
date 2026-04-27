@@ -435,6 +435,60 @@ def handoff_now(
         console.print("  [dim]no agent spawned[/dim]")
 
 
+@critic_app.command("watch")
+def critic_watch(
+    task: str = typer.Argument(..., help="Default task description for re-runs"),
+    project: Path = typer.Option(Path.cwd(), help="Project root"),
+    worker_model: str = typer.Option("claude-haiku-4-5-20251001"),
+    critic_model: str = typer.Option("claude-opus-4-7"),
+    interval: float = typer.Option(2.0, help="Poll interval (seconds)"),
+    debounce: float = typer.Option(3.0, help="Debounce window (seconds)"),
+    no_proxy: bool = typer.Option(False),
+) -> None:
+    """Re-run the critic loop whenever tracked files change."""
+    from handoff.critic.runner import CriticRunner
+    from handoff.critic.watch import WatchLoop
+
+    proxy = None if no_proxy else f"http://{PROXY_HOST}:{PROXY_PORT}"
+    root = project.resolve()
+    runner = CriticRunner(
+        root,
+        worker_model=worker_model,
+        critic_model=critic_model,
+        proxy_url=proxy,
+    )
+
+    def fire(changed: set[Path]) -> None:
+        names = sorted({p.name for p in changed})[:5]
+        console.print(f"[cyan]changed:[/cyan] {', '.join(names)}")
+        try:
+            result = runner.run(task)
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]critic run failed:[/red] {e}")
+            return
+        color = "green" if result.verdict == "approve" else "yellow"
+        console.print(
+            f"  [{color}]{result.verdict}[/{color}] "
+            f"worker={result.worker_tokens} critic={result.critic_tokens}"
+        )
+        try:
+            _rpc(
+                "record_critic_run",
+                worker_model=worker_model,
+                critic_model=critic_model,
+                worker_tokens=result.worker_tokens,
+                critic_tokens=result.critic_tokens,
+                verdict=result.verdict,
+                notes=result.notes,
+            )
+        except typer.Exit:
+            pass
+
+    loop = WatchLoop(root, fire, interval=interval, debounce=debounce)
+    console.print(f"[green]watching[/green] {root} (Ctrl-C to stop)")
+    loop.run_forever()
+
+
 @critic_app.command("run")
 def critic_run(
     task: str = typer.Argument(..., help="Task description for the worker model"),
