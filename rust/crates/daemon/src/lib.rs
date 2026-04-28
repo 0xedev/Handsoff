@@ -84,7 +84,31 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ingest", post(ingest))
         .route("/rpc", post(rpc))
+        .route("/simulate", post(simulate_limit))
         .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct SimulatePayload {
+    agent_id: i64,
+    #[serde(default)]
+    tokens: Option<i64>,
+    #[serde(default)]
+    requests: Option<i64>,
+}
+
+async fn simulate_limit(
+    State(state): State<AppState>,
+    Json(payload): Json<SimulatePayload>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let ev = failover::RateEvent {
+        agent_id: payload.agent_id,
+        kind: "simulated".to_string(),
+        tokens_remaining: payload.tokens,
+        requests_remaining: payload.requests,
+    };
+    state.events.send(ev).await.ok();
+    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
 async fn health() -> impl IntoResponse {

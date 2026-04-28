@@ -112,6 +112,18 @@ enum Cmd {
     },
     /// Preflight check: daemon, proxy, CA, agent binaries.
     Doctor,
+    /// Inject a synthetic rate-limit event to test failover
+    SimulateLimit {
+        /// Agent ID to target
+        #[arg(long)]
+        agent: i64,
+        /// Set tokens_remaining to this value (default 0)
+        #[arg(long, default_value = "0")]
+        tokens: i64,
+        /// Set requests_remaining to this value (default 0)
+        #[arg(long, default_value = "0")]
+        requests: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -233,6 +245,24 @@ async fn main() -> Result<()> {
         Cmd::Proxy(ProxyCmd::Status) => cmd_proxy_status(),
         Cmd::ProxyServer { addr } => handoff_proxy::run(addr, None).await,
         Cmd::Doctor => cmd_doctor().await,
+        Cmd::SimulateLimit { agent, tokens, requests } => {
+            let url = std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+            let res = reqwest::Client::new()
+                .post(format!("{}/simulate", url))
+                .json(&serde_json::json!({
+                    "agent_id": agent,
+                    "tokens": tokens,
+                    "requests": requests,
+                }))
+                .send()
+                .await?;
+            if res.status().is_success() {
+                println!("Synthetic rate-limit event sent for agent {}", agent);
+            } else {
+                eprintln!("Failed to send event: {:?}", res.text().await);
+            }
+            Ok(())
+        }
     }
 }
 

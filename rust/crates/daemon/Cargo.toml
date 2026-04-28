@@ -24,3 +24,4 @@ tempfile = "3"
 reqwest = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 rusqlite = { workspace = true }
+axum-test = "20.0.0"
