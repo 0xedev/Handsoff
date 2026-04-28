@@ -165,13 +165,16 @@ impl FailoverEngine {
     ) -> Result<HandoffOutcome> {
         let engine = ContextEngine::new(project_root);
         let (mut snap, _md_path) = engine.snapshot(reason)?;
-        // Ask the critic model for a focused brief if configured AND if the
-        // ANTHROPIC_API_KEY is available. Failure here is non-fatal.
-        if summarize && std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        // Ask the critic agent for a focused brief if configured. Failure
+        // is non-fatal — we fall back to the verbatim brain dump.
+        if summarize {
+            let policy = handoff_policy::load(project_root).unwrap_or_default();
             if let Ok(runner) = CriticRunner::new(project_root) {
-                let runner = runner.with_proxy(Some(self.proxy_url.clone()));
+                let runner = runner
+                    .with_agents(&policy.critic.worker_agent, &policy.critic.summarizer_agent)
+                    .with_proxy(Some(self.proxy_url.clone()));
                 match runner.summarize_for_handoff(reason).await {
-                    Ok((brief, _)) => snap.critic_brief = Some(brief),
+                    Ok(brief) => snap.critic_brief = Some(brief),
                     Err(e) => warn!("summarizer failed; verbatim fallback: {e}"),
                 }
             }

@@ -35,12 +35,16 @@ pub struct FailoverPolicy {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CriticPolicy {
-    #[serde(default = "default_worker")]
-    pub worker_model: String,
-    #[serde(default = "default_critic")]
-    pub critic_model: String,
-    #[serde(default = "default_critic")]
-    pub summarizer_model: String,
+    /// Local agent that drives the worker role (e.g. "claude", "codex").
+    /// Aliased to `worker_model` for back-compat with v0.4.0-alpha configs.
+    #[serde(default = "default_worker", alias = "worker_model")]
+    pub worker_agent: String,
+    /// Local agent that drives the critic role.
+    #[serde(default = "default_critic", alias = "critic_model")]
+    pub critic_agent: String,
+    /// Local agent used for failover-snapshot summarisation.
+    #[serde(default = "default_critic", alias = "summarizer_model")]
+    pub summarizer_agent: String,
 }
 
 fn default_pct() -> f64 {
@@ -56,10 +60,10 @@ fn yes() -> bool {
     true
 }
 fn default_worker() -> String {
-    "claude-haiku-4-5-20251001".into()
+    "claude".into()
 }
 fn default_critic() -> String {
-    "claude-opus-4-7".into()
+    "claude".into()
 }
 
 impl Default for Policy {
@@ -87,9 +91,9 @@ impl Default for FailoverPolicy {
 impl Default for CriticPolicy {
     fn default() -> Self {
         Self {
-            worker_model: default_worker(),
-            critic_model: default_critic(),
-            summarizer_model: default_critic(),
+            worker_agent: default_worker(),
+            critic_agent: default_critic(),
+            summarizer_agent: default_critic(),
         }
     }
 }

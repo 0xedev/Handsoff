@@ -52,6 +52,11 @@ enum Cmd {
         json: bool,
     },
     /// Spawn an agent with HTTPS_PROXY wired and register it with the daemon.
+    ///
+    /// Behaviour:
+    ///   `handoff spawn claude`                    → interactive TUI
+    ///   `handoff spawn claude -- "summarize"`     → headless (`claude -p "..."`)
+    ///   `handoff spawn claude --interactive -- ...` → forces interactive even with args
     Spawn {
         kind: String,
         #[arg(trailing_var_arg = true)]
@@ -60,6 +65,12 @@ enum Cmd {
         project: PathBuf,
         #[arg(long)]
         no_proxy: bool,
+        /// Force interactive mode even when positional args are present.
+        #[arg(long)]
+        interactive: bool,
+        /// Force headless mode even with no positional args (uses stdin).
+        #[arg(long, conflicts_with = "interactive")]
+        headless: bool,
     },
     /// Register an already-running agent process with the daemon.
     Attach {
@@ -99,6 +110,8 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: SocketAddr,
     },
+    /// Preflight check: daemon, proxy, CA, agent binaries.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -120,15 +133,17 @@ enum BrainCmd {
 
 #[derive(Subcommand)]
 enum CriticCmd {
-    /// One-shot worker+critic run.
+    /// One-shot worker+critic run, driven by local agent CLIs.
     Run {
         task: String,
         #[arg(long, default_value = ".")]
         project: PathBuf,
-        #[arg(long, default_value = handoff_critic::DEFAULT_WORKER_MODEL)]
-        worker_model: String,
-        #[arg(long, default_value = handoff_critic::DEFAULT_CRITIC_MODEL)]
-        critic_model: String,
+        /// Local agent for the worker role (claude | codex | copilot).
+        #[arg(long, default_value = handoff_critic::DEFAULT_WORKER_AGENT)]
+        worker: String,
+        /// Local agent for the critic role.
+        #[arg(long, default_value = handoff_critic::DEFAULT_CRITIC_AGENT)]
+        critic: String,
         #[arg(long)]
         no_proxy: bool,
     },
@@ -137,10 +152,10 @@ enum CriticCmd {
         task: String,
         #[arg(long, default_value = ".")]
         project: PathBuf,
-        #[arg(long, default_value = handoff_critic::DEFAULT_WORKER_MODEL)]
-        worker_model: String,
-        #[arg(long, default_value = handoff_critic::DEFAULT_CRITIC_MODEL)]
-        critic_model: String,
+        #[arg(long, default_value = handoff_critic::DEFAULT_WORKER_AGENT)]
+        worker: String,
+        #[arg(long, default_value = handoff_critic::DEFAULT_CRITIC_AGENT)]
+        critic: String,
         #[arg(long, default_value_t = 2.0)]
         interval: f64,
         #[arg(long, default_value_t = 3.0)]
@@ -193,8 +208,8 @@ async fn main() -> Result<()> {
         Cmd::Agents { project_id } => cmd_agents(project_id),
         Cmd::Discover => cmd_discover(),
         Cmd::Snapshot { path, reason, json } => cmd_snapshot(path, reason, json),
-        Cmd::Spawn { kind, args, project, no_proxy } => {
-            cmd_spawn(&kind, args, project, no_proxy).await
+        Cmd::Spawn { kind, args, project, no_proxy, interactive, headless } => {
+            cmd_spawn(&kind, args, project, no_proxy, interactive, headless).await
         }
         Cmd::Attach { pid, kind, project } => cmd_attach(pid, kind, project).await,
         Cmd::Handoff { to_kind, from_agent, reason, no_spawn, project } => {
@@ -203,12 +218,12 @@ async fn main() -> Result<()> {
         Cmd::Brain(BrainCmd::Cat { project }) => cmd_brain_cat(project),
         Cmd::Brain(BrainCmd::Edit { project }) => cmd_brain_edit(project),
         Cmd::Brain(BrainCmd::Append { text, project }) => cmd_brain_append(text, project),
-        Cmd::Critic(CriticCmd::Run { task, project, worker_model, critic_model, no_proxy }) => {
-            cmd_critic_run(&task, project, worker_model, critic_model, no_proxy).await
+        Cmd::Critic(CriticCmd::Run { task, project, worker, critic, no_proxy }) => {
+            cmd_critic_run(&task, project, worker, critic, no_proxy).await
         }
         Cmd::Critic(CriticCmd::Watch {
-            task, project, worker_model, critic_model, interval, debounce, no_proxy,
-        }) => cmd_critic_watch(task, project, worker_model, critic_model, interval, debounce, no_proxy).await,
+            task, project, worker, critic, interval, debounce, no_proxy,
+        }) => cmd_critic_watch(task, project, worker, critic, interval, debounce, no_proxy).await,
         Cmd::Daemon(DaemonCmd::Run { addr }) => cmd_daemon_run(addr).await,
         Cmd::Daemon(DaemonCmd::Start { addr }) => cmd_daemon_start(addr),
         Cmd::Daemon(DaemonCmd::Stop) => cmd_daemon_stop(),
@@ -217,6 +232,88 @@ async fn main() -> Result<()> {
         Cmd::Proxy(ProxyCmd::Stop) => cmd_proxy_stop(),
         Cmd::Proxy(ProxyCmd::Status) => cmd_proxy_status(),
         Cmd::ProxyServer { addr } => handoff_proxy::run(addr, None).await,
+        Cmd::Doctor => cmd_doctor().await,
+    }
+}
+
+async fn cmd_doctor() -> Result<()> {
+    let mut ok = true;
+    let mut out = Vec::<String>::new();
+
+    // Daemon
+    let daemon_url = std::env::var("HANDOFF_DAEMON_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:7879/health".into());
+    let daemon_alive = match reqwest::Client::new()
+        .get(&daemon_url)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => true,
+        _ => false,
+    };
+    out.push(format!(
+        "{} daemon @ {}",
+        if daemon_alive { "✓" } else { "✗" },
+        daemon_url.trim_end_matches("/health"),
+    ));
+    ok &= daemon_alive;
+
+    // Proxy
+    let proxy_pid = std::fs::read_to_string(handoff_common::proxy_pidfile())
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    let proxy_alive = proxy_pid.map(pid_alive).unwrap_or(false);
+    match (proxy_pid, proxy_alive) {
+        (Some(pid), true) => out.push(format!("✓ proxy @ {} (pid={pid})", proxy_url())),
+        (Some(pid), false) => {
+            out.push(format!("✗ proxy down (stale pidfile pid={pid})"));
+            ok = false;
+        }
+        (None, _) => {
+            out.push("✗ proxy down (no pidfile)".into());
+            ok = false;
+        }
+    }
+
+    // CA
+    let ca = handoff_common::home_dir().join("ca").join("cert.pem");
+    if ca.exists() {
+        out.push(format!("✓ CA at {}", ca.display()));
+    } else {
+        out.push(format!("✗ CA not generated yet ({})", ca.display()));
+        ok = false;
+    }
+
+    // Agent binaries
+    for (kind, bin) in [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("copilot", "gh"),
+        ("cursor", "cursor"),
+    ] {
+        match which::which(bin) {
+            Ok(p) => out.push(format!("✓ {kind:8} → {}", p.display())),
+            Err(_) => out.push(format!("⚠ {kind:8} → not on PATH")),
+        }
+    }
+
+    // Critic key (deliberately optional now — the refactored runner uses
+    // local CLIs, so this is informational).
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        out.push("ℹ ANTHROPIC_API_KEY set (not needed; critic uses local CLIs)".into());
+    } else {
+        out.push("ℹ ANTHROPIC_API_KEY not set (fine — critic uses local CLIs)".into());
+    }
+
+    for line in out {
+        println!("{line}");
+    }
+    if ok {
+        Ok(())
+    } else {
+        // Quiet exit — we already printed per-line diagnostics.
+        std::process::exit(1);
     }
 }
 
@@ -312,17 +409,32 @@ fn cmd_snapshot(path: PathBuf, reason: String, json: bool) -> Result<()> {
 
 // --- spawn / attach / handoff -------------------------------------------
 
-async fn cmd_spawn(kind: &str, args: Vec<String>, project: PathBuf, no_proxy: bool) -> Result<()> {
+async fn cmd_spawn(
+    kind: &str,
+    args: Vec<String>,
+    project: PathBuf,
+    no_proxy: bool,
+    force_interactive: bool,
+    force_headless: bool,
+) -> Result<()> {
     let _ak = AgentKind::parse(kind).ok_or_else(|| anyhow!("unknown kind: {kind}"))?;
     let adapter = handoff_adapters::for_kind(_ak);
     let project_root = project.canonicalize()?;
-    let bin = adapter
-        .binaries()
-        .iter()
-        .find_map(|b| which::which(b).ok())
-        .ok_or_else(|| anyhow!("no binary on PATH for kind={kind}"))?;
-    let mut cmd = std::process::Command::new(&bin);
-    cmd.args(&args).current_dir(&project_root);
+
+    // Decide the mode. Default rule: positional args present → headless.
+    let mode = if force_interactive {
+        SpawnMode::Interactive
+    } else if force_headless {
+        SpawnMode::Headless
+    } else if !args.is_empty() {
+        SpawnMode::Headless
+    } else {
+        SpawnMode::Interactive
+    };
+
+    let final_argv = build_spawn_argv(kind, &mode, &args, adapter)?;
+    let mut cmd = std::process::Command::new(&final_argv[0]);
+    cmd.args(&final_argv[1..]).current_dir(&project_root);
     if !no_proxy {
         for (k, v) in handoff_daemon::spawn::proxy_env(&proxy_url()) {
             cmd.env(k, v);
@@ -344,7 +456,11 @@ async fn cmd_spawn(kind: &str, args: Vec<String>, project: PathBuf, no_proxy: bo
         .get("agent_id")
         .and_then(|v| v.as_i64())
         .unwrap_or_default();
-    println!("spawned {kind} pid={pid} agent_id={aid}");
+    let mode_label = match mode {
+        SpawnMode::Interactive => "interactive",
+        SpawnMode::Headless => "headless",
+    };
+    println!("spawned {kind} ({mode_label}) pid={pid} agent_id={aid}");
     let status = child.wait()?;
     let _ = rpc_call(
         "stop_agent",
@@ -352,6 +468,62 @@ async fn cmd_spawn(kind: &str, args: Vec<String>, project: PathBuf, no_proxy: bo
     )
     .await;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnMode {
+    Interactive,
+    Headless,
+}
+
+fn build_spawn_argv(
+    kind: &str,
+    mode: &SpawnMode,
+    user_args: &[String],
+    adapter: Box<dyn handoff_adapters::Adapter>,
+) -> Result<Vec<String>> {
+    let bin = adapter
+        .binaries()
+        .iter()
+        .find_map(|b| which::which(b).ok())
+        .ok_or_else(|| anyhow!("no binary on PATH for kind={kind}"))?;
+    let bin_str = bin.display().to_string();
+    let mut argv: Vec<String> = vec![bin_str];
+
+    match mode {
+        SpawnMode::Interactive => {
+            // Pass user args through verbatim; no kind-specific transform.
+            argv.extend(user_args.iter().cloned());
+        }
+        SpawnMode::Headless => {
+            // Treat user_args as a single prompt. Most agents take it as one
+            // string after their headless flag.
+            let prompt = user_args.join(" ");
+            match kind {
+                "claude" => {
+                    argv.push("-p".into());
+                    argv.push(prompt);
+                }
+                "codex" => {
+                    argv.push("exec".into());
+                    argv.push(prompt);
+                }
+                "copilot" => {
+                    // `gh copilot suggest <prompt>` — bin is `gh` already.
+                    argv.push("copilot".into());
+                    argv.push("suggest".into());
+                    argv.push(prompt);
+                }
+                "cursor" | _ => {
+                    return Err(anyhow!(
+                        "no headless form known for kind={kind}; \
+                         pass --interactive or --no-proxy and craft your own argv"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(argv)
 }
 
 async fn cmd_attach(pid: i64, kind: String, project: PathBuf) -> Result<()> {
@@ -460,22 +632,20 @@ async fn cmd_critic_run(
 ) -> Result<()> {
     let root = project.canonicalize()?;
     let runner = handoff_critic::CriticRunner::new(&root)?
-        .with_models(worker.clone(), critic.clone())
+        .with_agents(worker.clone(), critic.clone())
         .with_proxy(if no_proxy { None } else { Some(proxy_url()) });
     let res = runner.run(task).await?;
     println!("verdict: {}", res.verdict);
     println!("notes: {}", res.notes);
-    println!("tokens: worker={} critic={}", res.worker_tokens, res.critic_tokens);
+    println!("worker={} critic={}", res.worker_agent, res.critic_agent);
     for a in &res.artifacts {
         println!("  wrote {a}");
     }
     let _ = rpc_call(
         "record_critic_run",
         serde_json::json!({
-            "worker_model": worker,
-            "critic_model": critic,
-            "worker_tokens": res.worker_tokens,
-            "critic_tokens": res.critic_tokens,
+            "worker_agent": res.worker_agent,
+            "critic_agent": res.critic_agent,
             "verdict": res.verdict,
             "notes": res.notes,
         }),
@@ -495,7 +665,7 @@ async fn cmd_critic_watch(
 ) -> Result<()> {
     let root = project.canonicalize()?;
     let runner = handoff_critic::CriticRunner::new(&root)?
-        .with_models(worker.clone(), critic.clone())
+        .with_agents(worker.clone(), critic.clone())
         .with_proxy(if no_proxy { None } else { Some(proxy_url()) });
     let mut watch = handoff_critic::watch::WatchLoop::new(&root, interval, debounce);
     println!("watching {} (Ctrl-C to stop)", root.display());
@@ -508,15 +678,13 @@ async fn cmd_critic_watch(
                 Ok(res) => {
                     println!(
                         "  {} worker={} critic={}",
-                        res.verdict, res.worker_tokens, res.critic_tokens,
+                        res.verdict, res.worker_agent, res.critic_agent
                     );
                     let _ = rpc_call(
                         "record_critic_run",
                         serde_json::json!({
-                            "worker_model": worker.clone(),
-                            "critic_model": critic.clone(),
-                            "worker_tokens": res.worker_tokens,
-                            "critic_tokens": res.critic_tokens,
+                            "worker_agent": res.worker_agent,
+                            "critic_agent": res.critic_agent,
                             "verdict": res.verdict,
                             "notes": res.notes,
                         }),
