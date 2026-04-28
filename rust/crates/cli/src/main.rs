@@ -80,6 +80,23 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
+    /// Simulate a rate-limit event for a specific agent
+    SimulateLimit {
+        agent_id: i64,
+        #[arg(long, default_value = "0")]
+        tokens: i64,
+        #[arg(long, default_value = "0")]
+        requests: i64,
+    },
+
+    /// Interactive first-time setup (generates CA, installs CLI hook)
+    Setup {
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// Print the shell hook script to be evaluated
+    InitHook,
     /// Manual handoff: snapshot context and (optionally) spawn the next agent.
     Handoff {
         to_kind: String,
@@ -112,18 +129,6 @@ enum Cmd {
     },
     /// Preflight check: daemon, proxy, CA, agent binaries.
     Doctor,
-    /// Inject a synthetic rate-limit event to test failover
-    SimulateLimit {
-        /// Agent ID to target
-        #[arg(long)]
-        agent: i64,
-        /// Set tokens_remaining to this value (default 0)
-        #[arg(long, default_value = "0")]
-        tokens: i64,
-        /// Set requests_remaining to this value (default 0)
-        #[arg(long, default_value = "0")]
-        requests: i64,
-    },
 }
 
 #[derive(Subcommand)]
@@ -245,22 +250,44 @@ async fn main() -> Result<()> {
         Cmd::Proxy(ProxyCmd::Status) => cmd_proxy_status(),
         Cmd::ProxyServer { addr } => handoff_proxy::run(addr, None).await,
         Cmd::Doctor => cmd_doctor().await,
-        Cmd::SimulateLimit { agent, tokens, requests } => {
+        Cmd::SimulateLimit { agent_id, tokens, requests } => {
             let url = std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
             let res = reqwest::Client::new()
                 .post(format!("{}/simulate", url))
                 .json(&serde_json::json!({
-                    "agent_id": agent,
+                    "agent_id": agent_id,
                     "tokens": tokens,
                     "requests": requests,
                 }))
                 .send()
                 .await?;
             if res.status().is_success() {
-                println!("Synthetic rate-limit event sent for agent {}", agent);
+                println!("Simulated rate limit event for agent {}", agent_id);
             } else {
                 eprintln!("Failed to send event: {:?}", res.text().await);
             }
+            Ok(())
+        }
+        Cmd::Setup { project } => handoff_cli::setup::run_setup(project.as_deref()).await,
+        Cmd::InitHook => {
+            let script = r#"
+handoff_wrap() {
+    local cmd=$1
+    shift
+    if [ "$cmd" = "claude" ]; then
+        handoff spawn claude -- "$@"
+    elif [ "$cmd" = "codex" ]; then
+        handoff spawn codex -- "$@"
+    elif [ "$cmd" = "gh" ] && [ "$1" = "copilot" ]; then
+        handoff spawn copilot -- "$@"
+    else
+        command "$cmd" "$@"
+    fi
+}
+alias claude="handoff_wrap claude"
+alias codex="handoff_wrap codex"
+"#;
+            print!("{}", script);
             Ok(())
         }
     }
