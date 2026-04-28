@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{State, Query},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -24,6 +24,7 @@ use tracing::warn;
 
 pub mod failover;
 pub mod spawn;
+pub mod worktree;
 
 use failover::{FailoverEngine, RateEvent};
 
@@ -32,6 +33,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub events: Sender<RateEvent>,
     pub failover: Arc<FailoverEngine>,
+    pub brain_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -44,6 +46,7 @@ impl AppState {
             db,
             events,
             failover: engine,
+            brain_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -85,7 +88,62 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ingest", post(ingest))
         .route("/rpc", post(rpc))
         .route("/simulate", post(simulate_limit))
+        .route("/handoffs", get(list_handoffs_http))
+        .route("/events", get(list_events_http))
+        .route("/hook", post(hook))
+        .route("/brain/append", post(brain_append))
+        .route("/brain/edit", post(brain_edit))
         .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct HookPayload {
+    agent_pid: Option<i32>,
+    tool_name: Option<String>,
+    tool_input: Option<String>,
+}
+
+async fn hook(
+    State(state): State<AppState>,
+    Json(payload): Json<HookPayload>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pid) = payload.agent_pid {
+        if let Ok(Some(agent)) = state.db.find_agent_by_pid(pid as i64) {
+            let _ = state.db.insert_activity(
+                agent.id,
+                payload.tool_name.as_deref().unwrap_or("unknown"),
+                payload.tool_input.as_deref(),
+            );
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PaginationParams {
+    limit: Option<usize>,
+}
+
+async fn list_handoffs_http(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
+) -> Json<serde_json::Value> {
+    let limit = params.limit.unwrap_or(5);
+    let rows = state.db.list_handoffs_recent(limit as i64).unwrap_or_default();
+    Json(serde_json::json!({"handoffs": rows}))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct EventsParams {
+    since: Option<u64>,
+}
+
+async fn list_events_http(
+    State(_state): State<AppState>,
+    Query(_params): Query<EventsParams>,
+) -> Json<serde_json::Value> {
+    // Stub
+    Json(serde_json::json!({"events": []}))
 }
 
 #[derive(serde::Deserialize)]
@@ -374,7 +432,61 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct BrainAppend {
+    project_root: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct BrainEdit {
+    project_root: String,
+    content: String,
+}
+
+async fn brain_append(
+    State(state): State<AppState>,
+    Json(payload): Json<BrainAppend>,
+) -> impl IntoResponse {
+    let _lock = state.brain_lock.lock().await;
+    let path = std::path::Path::new(&payload.project_root)
+        .join(".handoff")
+        .join("brain.md");
+    
+    use std::io::Write;
+    let mut file = match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path) {
+            Ok(f) => f,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to open brain.md: {e}")).into_response(),
+        };
+    
+    if let Err(e) = writeln!(file, "\n{}", payload.text) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to write to brain.md: {e}")).into_response();
+    }
+
+    StatusCode::OK.into_response()
+}
+
+async fn brain_edit(
+    State(state): State<AppState>,
+    Json(payload): Json<BrainEdit>,
+) -> impl IntoResponse {
+    let _lock = state.brain_lock.lock().await;
+    let path = std::path::Path::new(&payload.project_root)
+        .join(".handoff")
+        .join("brain.md");
+    
+    if let Err(e) = std::fs::write(&path, &payload.content) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to write brain.md: {e}")).into_response();
+    }
+
+    StatusCode::OK.into_response()
+}
+
 #[allow(dead_code)]
 fn _adapters_keepalive() -> usize {
     all_adapters().len()
 }
+

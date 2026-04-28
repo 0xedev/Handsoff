@@ -133,6 +133,9 @@ pub struct ClaudeAdapter;
 pub struct CodexAdapter;
 pub struct CopilotAdapter;
 pub struct CursorAdapter;
+pub struct GeminiAdapter;
+pub struct AiderAdapter;
+pub struct ClineAdapter;
 
 impl Adapter for ClaudeAdapter {
     fn kind(&self) -> AgentKind {
@@ -266,7 +269,6 @@ impl Adapter for CopilotAdapter {
         vec![root.join(".github").join("copilot-instructions.md")]
     }
     fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> {
-        // Copilot headers are opaque; daemon counts requests instead.
         None
     }
     fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
@@ -295,7 +297,6 @@ impl Adapter for CursorAdapter {
             if p.cmdline.is_empty() {
                 continue;
             }
-            // Skip Electron child processes.
             if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
                 continue;
             }
@@ -322,12 +323,48 @@ impl Adapter for CursorAdapter {
     }
 }
 
+impl Adapter for GeminiAdapter {
+    fn kind(&self) -> AgentKind { AgentKind::Gemini }
+    fn binaries(&self) -> &'static [&'static str] { &["gemini"] }
+    fn api_hosts(&self) -> &'static [&'static str] { &["generativelanguage.googleapis.com"] }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> { vec![root.join("GEMINI.md")] }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> { None }
+    fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
+        Some(vec!["-p".into(), prompt.into()])
+    }
+}
+
+impl Adapter for AiderAdapter {
+    fn kind(&self) -> AgentKind { AgentKind::Aider }
+    fn binaries(&self) -> &'static [&'static str] { &["aider"] }
+    fn api_hosts(&self) -> &'static [&'static str] { &["api.openai.com", "api.anthropic.com"] }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> { vec![root.join(".aider.conf.yml")] }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> { None }
+    fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
+        Some(vec!["--message".into(), prompt.into(), "--yes".into()])
+    }
+}
+
+impl Adapter for ClineAdapter {
+    fn kind(&self) -> AgentKind { AgentKind::Cline }
+    fn binaries(&self) -> &'static [&'static str] { &["cline"] }
+    fn api_hosts(&self) -> &'static [&'static str] { &[] }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> { vec![root.join(".clinerules")] }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> { None }
+    fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
+        Some(vec!["-p".into(), prompt.into()])
+    }
+}
+
 pub fn all() -> Vec<Box<dyn Adapter>> {
     vec![
         Box::new(ClaudeAdapter),
         Box::new(CodexAdapter),
         Box::new(CopilotAdapter),
         Box::new(CursorAdapter),
+        Box::new(GeminiAdapter),
+        Box::new(AiderAdapter),
+        Box::new(ClineAdapter),
     ]
 }
 
@@ -337,6 +374,9 @@ pub fn for_kind(kind: AgentKind) -> Box<dyn Adapter> {
         AgentKind::Codex => Box::new(CodexAdapter),
         AgentKind::Copilot => Box::new(CopilotAdapter),
         AgentKind::Cursor => Box::new(CursorAdapter),
+        AgentKind::Gemini => Box::new(GeminiAdapter),
+        AgentKind::Aider => Box::new(AiderAdapter),
+        AgentKind::Cline => Box::new(ClineAdapter),
     }
 }
 

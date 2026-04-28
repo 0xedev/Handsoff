@@ -42,11 +42,15 @@ pub struct CriticResult {
     pub artifacts: Vec<String>,
 }
 
+pub mod diff;
+
+
 pub struct CriticRunner {
     project_root: PathBuf,
     worker_agent: String,
     critic_agent: String,
     proxy_url: Option<String>,
+    pub max_rounds: Option<u32>,
     /// Test-only: pre-canned responses keyed by `(agent, system_kind)`.
     /// `system_kind` is one of "worker", "critic", "summarizer".
     fake: Option<FakeResponses>,
@@ -62,6 +66,7 @@ impl CriticRunner {
             worker_agent: DEFAULT_WORKER_AGENT.into(),
             critic_agent: DEFAULT_CRITIC_AGENT.into(),
             proxy_url: Some("http://127.0.0.1:8080".into()),
+            max_rounds: Some(3),
             fake: None,
         })
     }
@@ -144,55 +149,83 @@ impl CriticRunner {
 
     /// Run the full worker → critic → (revise on redirect) → critic loop.
     pub async fn run(&self, task: &str) -> Result<CriticResult> {
+        let max_rounds = self.max_rounds.unwrap_or(3);
+        let mut feedback: Option<String> = None;
+        let mut last_worker_output = String::new();
+
         let brain = self.read_brain();
 
-        let worker_prompt = format!(
-            "## Project brain\n\n{brain}\n\n## Task\n\n{task}\n\nNow produce <plan> and <diff>."
-        );
-        let worker_text = self
-            .ask(&self.worker_agent, WORKER_SYSTEM, &worker_prompt)
-            .await?;
-        let mut plan = extract(&worker_text, "plan");
-        let mut diff = extract(&worker_text, "diff");
+        for round in 1..=max_rounds {
+            // Worker pass
+            let worker_prompt = match &feedback {
+                Some(fb) => format!(
+                    "## Project brain\n\n{brain}\n\n## Task\n\n{task}\n\n\
+                    ## Critic feedback from round {}:\n{}\n\n\
+                    Revise. Produce <plan> and <diff>.",
+                    round - 1,
+                    fb
+                ),
+                None => format!(
+                    "## Project brain\n\n{brain}\n\n## Task\n\n{task}\n\nNow produce <plan> and <diff>."
+                ),
+            };
 
-        let critic_prompt = make_critic_prompt(task, &plan, &diff);
-        let critic_text = self
-            .ask(&self.critic_agent, CRITIC_SYSTEM, &critic_prompt)
-            .await?;
-        let (mut verdict, mut notes) = parse_verdict(&critic_text);
-
-        if verdict == "redirect" {
-            let revise_prompt = format!(
-                "{worker_prompt}\n\n## Critic feedback (your previous attempt was rejected)\n\
-                {notes}\n\nRevise. Produce <plan> and <diff> again."
-            );
-            let worker_text2 = self
-                .ask(&self.worker_agent, WORKER_SYSTEM, &revise_prompt)
+            last_worker_output = self
+                .ask(&self.worker_agent, WORKER_SYSTEM, &worker_prompt)
                 .await?;
-            let new_plan = extract(&worker_text2, "plan");
-            let new_diff = extract(&worker_text2, "diff");
-            if !new_plan.is_empty() {
-                plan = new_plan;
-            }
-            if !new_diff.is_empty() {
-                diff = new_diff;
-            }
 
-            let critic_prompt2 = make_critic_prompt(task, &plan, &diff);
-            let critic_text2 = self
-                .ask(&self.critic_agent, CRITIC_SYSTEM, &critic_prompt2)
+            let plan = extract(&last_worker_output, "plan");
+            let diff = extract(&last_worker_output, "diff");
+
+            // Critic pass
+            let critic_prompt = make_critic_prompt(task, &plan, &diff);
+            let critic_text = self
+                .ask(&self.critic_agent, CRITIC_SYSTEM, &critic_prompt)
                 .await?;
-            let parsed = parse_verdict(&critic_text2);
-            verdict = parsed.0;
-            notes = parsed.1;
+
+            let (verdict, notes) = parse_verdict(&critic_text);
+
+            if verdict == "approve" {
+                // Extracted diffs
+                let diffs = diff::extract_diffs(&last_worker_output);
+                let _applied = diffs
+                    .iter()
+                    .all(|d| diff::apply_check(d, &self.project_root));
+
+                let artifacts = self.write_artifacts(task, &plan, &diff, &verdict, &notes)?;
+                return Ok(CriticResult {
+                    verdict: "APPROVED".into(),
+                    plan,
+                    diff,
+                    notes,
+                    worker_agent: self.worker_agent.clone(),
+                    critic_agent: self.critic_agent.clone(),
+                    artifacts,
+                });
+            } else if verdict == "redirect" {
+                feedback = Some(notes.clone());
+                // Continue to next round
+            } else {
+                // Unknown verdict — treat as done to avoid infinite loop
+                break;
+            }
         }
 
-        let artifacts = self.write_artifacts(task, &plan, &diff, &verdict, &notes)?;
+        let plan = extract(&last_worker_output, "plan");
+        let diff = extract(&last_worker_output, "diff");
+        let artifacts = self.write_artifacts(
+            task,
+            &plan,
+            &diff,
+            "MAX_ROUNDS_REACHED",
+            "Reached max rounds without approval",
+        )?;
+
         Ok(CriticResult {
-            verdict,
+            verdict: "MAX_ROUNDS_REACHED".into(),
             plan,
             diff,
-            notes,
+            notes: format!("Reached {max_rounds} rounds without approval"),
             worker_agent: self.worker_agent.clone(),
             critic_agent: self.critic_agent.clone(),
             artifacts,
@@ -403,7 +436,7 @@ mod tests {
                 r#"{"verdict":"approve","notes":"ok"}"#.into(),
             ]);
         let res = runner.run("add a greet function").await.unwrap();
-        assert_eq!(res.verdict, "approve");
+        assert_eq!(res.verdict, "APPROVED");
         assert!(res.diff.contains("greet"));
         assert_eq!(res.worker_agent, "claude");
         assert!(res.artifacts.iter().any(|p| p.ends_with(".md")));
@@ -425,7 +458,7 @@ mod tests {
                 r#"{"verdict":"approve","notes":"ok"}"#.into(),
             ]);
         let res = runner.run("do something").await.unwrap();
-        assert_eq!(res.verdict, "approve");
+        assert_eq!(res.verdict, "APPROVED");
         assert!(res.plan.contains("fixed"));
         assert!(res.diff.contains("better"));
         assert_eq!(res.worker_agent, "claude");

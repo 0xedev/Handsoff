@@ -17,6 +17,14 @@ pub struct Policy {
     pub critic: CriticPolicy,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RateSampleInput {
+    pub kind: String,
+    pub tokens_remaining: i64,
+    pub tokens_reset_at: Option<i64>,
+}
+
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FailoverPolicy {
     #[serde(default = "default_pct")]
@@ -31,6 +39,10 @@ pub struct FailoverPolicy {
     pub auto_spawn: bool,
     #[serde(default)]
     pub summarize: bool,
+    #[serde(default)]
+    pub use_worktree: bool,
+    #[serde(default)]
+    pub return_to_primary: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,7 +57,14 @@ pub struct CriticPolicy {
     /// Local agent used for failover-snapshot summarisation.
     #[serde(default = "default_critic", alias = "summarizer_model")]
     pub summarizer_agent: String,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
 }
+
+fn default_max_rounds() -> u32 {
+    3
+}
+
 
 fn default_pct() -> f64 {
     10.0
@@ -84,6 +103,8 @@ impl Default for FailoverPolicy {
             chain: default_chain(),
             auto_spawn: true,
             summarize: false,
+            use_worktree: false,
+            return_to_primary: false,
         }
     }
 }
@@ -94,6 +115,7 @@ impl Default for CriticPolicy {
             worker_agent: default_worker(),
             critic_agent: default_critic(),
             summarizer_agent: default_critic(),
+            max_rounds: default_max_rounds(),
         }
     }
 }
@@ -158,11 +180,35 @@ pub fn should_trigger(
 }
 
 /// Pick the next agent in the chain, skipping the current one.
-pub fn pick_next<'a>(chain: &'a [String], current: Option<&str>) -> Option<&'a str> {
-    chain
+/// If `samples` are provided, picks the one with most tokens.
+pub fn pick_next<'a>(
+    chain: &'a [String],
+    current: &str,
+    samples: &[RateSampleInput],
+) -> Option<&'a str> {
+    // Candidates: in-chain agents that aren't current
+    let candidates: Vec<&String> = chain.iter().filter(|k| k.as_str() != current).collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if samples.is_empty() {
+        // Fallback: first candidate in chain order
+        return Some(candidates[0].as_str());
+    }
+
+    // Pick the candidate with the highest tokens_remaining
+    candidates
         .iter()
-        .map(|s| s.as_str())
-        .find(|k| Some(*k) != current)
+        .max_by_key(|k| {
+            samples
+                .iter()
+                .find(|s| s.kind == ***k)
+                .map(|s| s.tokens_remaining)
+                .unwrap_or(0)
+        })
+        .map(|k| k.as_str())
 }
 
 #[cfg(test)]
@@ -201,12 +247,12 @@ mod tests {
     #[test]
     fn pick_next_skips_current() {
         let chain = vec!["claude".to_string(), "codex".into(), "copilot".into()];
-        assert_eq!(pick_next(&chain, Some("claude")), Some("codex"));
+        assert_eq!(pick_next(&chain, "claude", &[]), Some("codex"));
     }
 
     #[test]
     fn pick_next_first_when_unknown() {
         let chain = vec!["claude".to_string(), "codex".into()];
-        assert_eq!(pick_next(&chain, Some("antigravity")), Some("claude"));
+        assert_eq!(pick_next(&chain, "antigravity", &[]), Some("claude"));
     }
 }

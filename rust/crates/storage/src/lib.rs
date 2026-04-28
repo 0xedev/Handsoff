@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS request_counts (
     last_request_at INTEGER,
     last_429_at     INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS agent_activity (
+    id          INTEGER PRIMARY KEY,
+    agent_id    INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    ts          INTEGER NOT NULL,
+    tool_name   TEXT,
+    tool_input  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_agent ON agent_activity(agent_id, ts);
 "#;
 
 pub struct Database {
@@ -104,6 +113,41 @@ pub struct AgentSummary {
     pub rate_limited_count: i64,
     pub last_429_at: Option<i64>,
 }
+
+#[derive(Debug, Clone)]
+pub struct RateSampleRow {
+    pub tokens_remaining: Option<i64>,
+    pub tokens_reset_at: Option<i64>,
+}
+
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HandoffRow {
+    pub id: i64,
+    pub from_agent_id: Option<i64>,
+    pub to_agent_id: Option<i64>,
+    pub reason: String,
+    pub ts: i64,
+    pub context_snapshot_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayData {
+    pub handoff: HandoffRow,
+    pub from_agent: Option<AgentSummary>,
+    pub to_agent: Option<AgentSummary>,
+    pub snapshot_content: Option<String>,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DailyStat {
+    pub date: String,
+    pub kind: String,
+    pub total_requests: i64,
+    pub avg_tokens_remaining: Option<f64>,
+    pub handoff_count: i64,
+}
+
+
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
@@ -153,6 +197,24 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    pub fn insert_activity(&self, agent_id: i64, tool_name: &str, tool_input: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_activity (agent_id, ts, tool_name, tool_input) VALUES (?1, ?2, ?3, ?4)",
+            params![agent_id, chrono::Utc::now().timestamp(), tool_name, tool_input],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_agent_pid(&self, id: i64, pid: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agents SET pid = ?1 WHERE id = ?2",
+            params![pid, id],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_agent_stopped(&self, agent_id: i64, status: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().timestamp();
@@ -175,6 +237,25 @@ impl Database {
             )
             .optional()?;
         Ok(row)
+    }
+
+    pub fn latest_rate_sample_for_kind(&self, kind: &str) -> Result<Option<RateSampleRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT rs.tokens_remaining, rs.tokens_reset_at FROM rate_samples rs \
+             JOIN agents a ON a.id = rs.agent_id \
+             WHERE a.kind = ?1 \
+             ORDER BY rs.ts DESC LIMIT 1",
+            params![kind],
+            |row| {
+                Ok(RateSampleRow {
+                    tokens_remaining: row.get(0)?,
+                    tokens_reset_at: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn project_root(&self, project_id: i64) -> Result<Option<String>> {
@@ -324,6 +405,118 @@ impl Database {
             params![from_agent_id, to_agent_id, reason, now, snapshot_path],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_handoff(&self, id: i64) -> Result<HandoffRow> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, from_agent_id, to_agent_id, reason, ts, context_snapshot_path \
+             FROM handoffs WHERE id = ?"
+        )?;
+        let row = stmt.query_row([id], |row| {
+            Ok(HandoffRow {
+                id: row.get(0)?,
+                from_agent_id: row.get(1)?,
+                to_agent_id: row.get(2)?,
+                reason: row.get(3)?,
+                ts: row.get(4)?,
+                context_snapshot_path: row.get(5)?,
+            })
+        })?;
+        Ok(row)
+    }
+    pub fn get_agent(&self, id: i64) -> Result<AgentSummary> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, pid, status, spawned_by, started_at, tokens_remaining, requests_remaining, \
+             tokens_reset_at, last_sample_ts, total_requests, rate_limited_count, last_429_at \
+             FROM agents WHERE id = ?"
+        )?;
+        let row = stmt.query_row([id], |row| {
+            Ok(AgentSummary {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                pid: row.get(2)?,
+                status: row.get(3)?,
+                spawned_by: row.get(4)?,
+                started_at: row.get(5)?,
+                tokens_remaining: row.get(6)?,
+                requests_remaining: row.get(7)?,
+                tokens_reset_at: row.get(8)?,
+                last_sample_ts: row.get(9)?,
+                total_requests: row.get(10)?,
+                rate_limited_count: row.get(11)?,
+                last_429_at: row.get(12)?,
+            })
+        })?;
+        Ok(row)
+    }
+
+    pub fn get_replay_data(&self, handoff_id: i64) -> Result<ReplayData> {
+        let h = self.get_handoff(handoff_id)?;
+        let from = h.from_agent_id.and_then(|id| self.get_agent(id).ok());
+        let to = h.to_agent_id.and_then(|id| self.get_agent(id).ok());
+        let snap = h.context_snapshot_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+
+        Ok(ReplayData {
+            handoff: h,
+            from_agent: from,
+            to_agent: to,
+            snapshot_content: snap,
+        })
+    }
+
+    pub fn daily_stats(&self, days: u32) -> Result<Vec<DailyStat>> {
+        let conn = self.conn.lock().unwrap();
+        let since = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+        let mut stmt = conn.prepare(
+            "SELECT date(rs.ts, 'unixepoch') as d, \
+                    a.kind, \
+                    COUNT(*) as total, \
+                    AVG(rs.tokens_remaining) as avg_tok, \
+                    (SELECT COUNT(*) FROM handoffs h JOIN agents fa ON fa.id = h.from_agent_id WHERE fa.kind = a.kind AND date(h.ts, 'unixepoch') = date(rs.ts, 'unixepoch')) as hc \
+             FROM rate_samples rs \
+             JOIN agents a ON a.id = rs.agent_id \
+             WHERE rs.ts > ?1 \
+             GROUP BY d, a.kind \
+             ORDER BY d DESC"
+        )?;
+        let rows = stmt.query_map([since], |row| {
+            Ok(DailyStat {
+                date: row.get(0)?,
+                kind: row.get(1)?,
+                total_requests: row.get(2)?,
+                avg_tokens_remaining: row.get(3)?,
+                handoff_count: row.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_handoffs_recent(&self, limit: i64) -> Result<Vec<HandoffRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, from_agent_id, to_agent_id, reason, ts, context_snapshot_path \
+             FROM handoffs ORDER BY ts DESC LIMIT ?1"
+        )?;
+        let rows = stmt.query(rusqlite::params![limit])?;
+        let mut out = Vec::new();
+        let mut iter = rows;
+        while let Some(r) = iter.next()? {
+            out.push(HandoffRow {
+                id: r.get(0)?,
+                from_agent_id: r.get(1)?,
+                to_agent_id: r.get(2)?,
+                reason: r.get(3)?,
+                ts: r.get(4)?,
+                context_snapshot_path: r.get(5)?,
+            });
+        }
+        Ok(out)
     }
 
     pub fn insert_critic_run(

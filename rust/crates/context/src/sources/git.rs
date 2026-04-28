@@ -46,6 +46,15 @@ pub fn head_info(root: &Path) -> Option<GitHead> {
     })
 }
 
+pub fn log(root: &Path, count: usize) -> Option<String> {
+    run(root, &["log", "--oneline", &format!("-{}", count)])
+}
+
+pub fn untracked_files(root: &Path) -> Option<Vec<String>> {
+    let raw = run(root, &["ls-files", "--others", "--exclude-standard"])?;
+    Some(raw.lines().map(|s| s.to_string()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

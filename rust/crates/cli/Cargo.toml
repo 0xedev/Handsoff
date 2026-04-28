@@ -28,5 +28,9 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 chrono.workspace = true
 which = "6"
+dirs = "6"
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }

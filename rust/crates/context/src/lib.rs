@@ -16,6 +16,7 @@
 //! it) and a human-readable Markdown rendering.
 
 pub mod sources;
+pub mod conversations;
 
 use std::path::{Path, PathBuf};
 
@@ -152,9 +153,12 @@ impl ContextEngine {
         let git_diff = sources::git::diff_head(&self.root).unwrap_or_default();
         let files_touched = sources::git::files_touched(&self.root).unwrap_or_default();
         let git_head = sources::git::head_info(&self.root);
+        let git_log = sources::git::log(&self.root, 10);
+        let untracked_files = sources::git::untracked_files(&self.root).unwrap_or_default();
         let recent_commands = sources::shell::recent_commands(&self.root, 20);
         let failing_tests = sources::tests::failing_from_scratch(&self.handoff_dir().join("scratch"));
         let intent = SnapshotIntentSource::load(&self.intent_path()).unwrap_or_default();
+        let conversation_tail = conversations::claude_conversation_tail(&self.root);
 
         let snap = Snapshot {
             generated_at: now,
@@ -163,6 +167,8 @@ impl ContextEngine {
             git_diff: truncate(&git_diff, 12_000),
             files_touched,
             git_head,
+            git_log,
+            untracked_files,
             recent_commands,
             failing_tests,
             current_objective: intent.current_objective,
@@ -170,6 +176,7 @@ impl ContextEngine {
             next_action: intent.next_action,
             do_not_touch: intent.do_not_touch,
             critic_brief: None,
+            conversation_tail,
         };
 
         // Persist both .json (machine) and .md (human).
@@ -249,6 +256,20 @@ pub fn render_markdown(s: &Snapshot) -> String {
         out.push('\n');
     }
 
+    if !s.untracked_files.is_empty() {
+        out.push_str("## Untracked files\n\n");
+        for f in &s.untracked_files {
+            out.push_str(&format!("- `{}`\n", f));
+        }
+        out.push('\n');
+    }
+
+    if let Some(log) = &s.git_log {
+        out.push_str("## Recent commits\n\n```\n");
+        out.push_str(log);
+        out.push_str("```\n\n");
+    }
+
     if !s.git_diff.trim().is_empty() {
         out.push_str("## Working diff (`git diff HEAD`)\n\n```diff\n");
         out.push_str(&s.git_diff);
@@ -284,6 +305,12 @@ pub fn render_markdown(s: &Snapshot) -> String {
     if let Some(b) = &s.critic_brief {
         out.push_str("## Critic brief\n\n");
         out.push_str(b);
+        out.push_str("\n\n");
+    }
+
+    if let Some(tail) = &s.conversation_tail {
+        out.push_str("## Conversation tail\n\n");
+        out.push_str(tail);
         out.push_str("\n\n");
     }
 

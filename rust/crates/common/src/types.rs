@@ -7,6 +7,7 @@ pub enum Provider {
     Anthropic,
     Openai,
     Github,
+    Google,
 }
 
 impl Provider {
@@ -15,6 +16,7 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::Openai => "openai",
             Provider::Github => "github",
+            Provider::Google => "google",
         }
     }
 }
@@ -41,6 +43,9 @@ pub enum AgentKind {
     Codex,
     Copilot,
     Cursor,
+    Gemini,
+    Aider,
+    Cline,
 }
 
 impl AgentKind {
@@ -50,6 +55,9 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::Copilot => "copilot",
             AgentKind::Cursor => "cursor",
+            AgentKind::Gemini => "gemini",
+            AgentKind::Aider => "aider",
+            AgentKind::Cline => "cline",
         }
     }
 
@@ -59,6 +67,9 @@ impl AgentKind {
             "codex" => Some(Self::Codex),
             "copilot" | "gh-copilot" => Some(Self::Copilot),
             "cursor" | "antigravity" => Some(Self::Cursor),
+            "gemini" => Some(Self::Gemini),
+            "aider" => Some(Self::Aider),
+            "cline" => Some(Self::Cline),
             _ => None,
         }
     }
@@ -95,6 +106,10 @@ pub struct Snapshot {
 
     /// Optional critic-summarized brief (when summarize=true in policy).
     pub critic_brief: Option<String>,
+
+    pub git_log: Option<String>,
+    pub untracked_files: Vec<String>,
+    pub conversation_tail: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

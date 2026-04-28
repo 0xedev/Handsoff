@@ -35,13 +35,26 @@ enum Cmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// List running agents with their latest rate-limit state.
+    /// List active agents.
     Agents {
         #[arg(long)]
         project_id: Option<i64>,
+        /// Print once and exit (no live UI)
+        #[arg(long)]
+        once: bool,
     },
     /// Scan running processes for known agents.
     Discover,
+    /// Manage agent worktrees.
+    Worktree {
+        #[clap(subcommand)]
+        cmd: WorktreeCmd,
+    },
+    /// Manage agent hooks.
+    Hook {
+        #[clap(subcommand)]
+        cmd: HookCmd,
+    },
     /// Build an intelligent Snapshot of the current project state.
     Snapshot {
         #[arg(default_value = ".")]
@@ -88,6 +101,20 @@ enum Cmd {
         #[arg(long, default_value = "0")]
         requests: i64,
     },
+    /// Pipe a command through output reducers to save tokens.
+    Reduce {
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Tail or cat logs for a target.
+    Logs {
+        /// "daemon" | "proxy" | "agent"
+        target: String,
+        /// Required if target is "agent"
+        agent_id: Option<i64>,
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
 
     /// Interactive first-time setup (generates CA, installs CLI hook)
     Setup {
@@ -112,6 +139,10 @@ enum Cmd {
     /// View / edit the project brain.
     #[command(subcommand)]
     Brain(BrainCmd),
+    /// Replay a handoff event.
+    Replay {
+        handoff_id: i64,
+    },
     /// Cheap-worker / expensive-critic loop.
     #[command(subcommand)]
     Critic(CriticCmd),
@@ -129,6 +160,13 @@ enum Cmd {
     },
     /// Preflight check: daemon, proxy, CA, agent binaries.
     Doctor,
+    /// Usage statistics and daily token/request aggregation.
+    Stats {
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        #[arg(long)]
+        graph: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -211,19 +249,35 @@ enum ProxyCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
+    let log_dir = home_dir().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(log_dir, "handoff.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into());
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false);
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout);
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stdout_layer)
         .init();
 
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Init { path } => cmd_init(path),
         Cmd::Sync { path } => cmd_sync(path),
-        Cmd::Agents { project_id } => cmd_agents(project_id),
+        Cmd::Agents { project_id, once } => cmd_agents(project_id, once).await,
         Cmd::Discover => cmd_discover(),
+        Cmd::Worktree { cmd } => cmd_worktree(cmd),
+        Cmd::Hook { cmd } => cmd_hook(cmd),
         Cmd::Snapshot { path, reason, json } => cmd_snapshot(path, reason, json),
         Cmd::Spawn { kind, args, project, no_proxy, interactive, headless } => {
             cmd_spawn(&kind, args, project, no_proxy, interactive, headless).await
@@ -233,8 +287,9 @@ async fn main() -> Result<()> {
             cmd_handoff(to_kind, from_agent, reason, !no_spawn, project).await
         }
         Cmd::Brain(BrainCmd::Cat { project }) => cmd_brain_cat(project),
-        Cmd::Brain(BrainCmd::Edit { project }) => cmd_brain_edit(project),
-        Cmd::Brain(BrainCmd::Append { text, project }) => cmd_brain_append(text, project),
+        Cmd::Brain(BrainCmd::Edit { project }) => cmd_brain_edit(project).await,
+        Cmd::Brain(BrainCmd::Append { text, project }) => cmd_brain_append(text, project).await,
+        Cmd::Replay { handoff_id } => cmd_replay(handoff_id).await,
         Cmd::Critic(CriticCmd::Run { task, project, worker, critic, no_proxy }) => {
             cmd_critic_run(&task, project, worker, critic, no_proxy).await
         }
@@ -250,7 +305,18 @@ async fn main() -> Result<()> {
         Cmd::Proxy(ProxyCmd::Status) => cmd_proxy_status(),
         Cmd::ProxyServer { addr } => handoff_proxy::run(addr, None).await,
         Cmd::Doctor => cmd_doctor().await,
-        Cmd::SimulateLimit { agent_id, tokens, requests } => {
+        Cmd::Stats { days, graph } => cmd_stats(days, graph),
+        Cmd::Reduce { args } => {
+            handoff_cli::reduce::run_reduce(&args).await?;
+            Ok(())
+        }
+        Cmd::Logs {
+            target,
+            agent_id,
+            follow,
+        } => cmd_logs(target, agent_id, follow).await,
+        Cmd::SimulateLimit {
+            agent_id, tokens, requests } => {
             let url = std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
             let res = reqwest::Client::new()
                 .post(format!("{}/simulate", url))
@@ -395,7 +461,13 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_agents(project_id: Option<i64>) -> Result<()> {
+async fn cmd_agents(project_id: Option<i64>, once: bool) -> Result<()> {
+    if !once {
+        let url = std::env::var("HANDOFF_DAEMON_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+        return handoff_cli::tui::run(&url).await;
+    }
+
     let db = Database::open(&db_path())?;
     let agents = db.list_agent_summaries(project_id)?;
     if agents.is_empty() {
@@ -643,26 +715,48 @@ fn cmd_brain_cat(project: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_brain_edit(project: PathBuf) -> Result<()> {
+async fn cmd_brain_edit(project: PathBuf) -> Result<()> {
     let p = brain_path(&project)?;
+    let root = project.canonicalize()?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let status = std::process::Command::new(&editor).arg(&p).status()?;
     if !status.success() {
         return Err(anyhow!("$EDITOR exited with {status}"));
     }
+
+    // After edit, push to daemon if possible to ensure it has latest?
+    // Actually, daemon reads from disk, but serialized access might want to know.
+    // For now, let's just let it be. Serializing edits is hard because of the interactive nature.
     Ok(())
 }
 
-fn cmd_brain_append(text: String, project: PathBuf) -> Result<()> {
-    let p = brain_path(&project)?;
-    let mut existing = std::fs::read_to_string(&p)?;
-    if !existing.ends_with('\n') {
-        existing.push('\n');
+async fn cmd_brain_append(text: String, project: PathBuf) -> Result<()> {
+    let project_root = project.canonicalize()?;
+    let url = std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+    
+    let res = reqwest::Client::new()
+        .post(format!("{}/brain/append", url))
+        .json(&serde_json::json!({
+            "project_root": project_root.display().to_string(),
+            "text": text,
+        }))
+        .send()
+        .await;
+
+    match res {
+        Ok(resp) if resp.status().is_success() => {
+            println!("appended to brain.md (via daemon)");
+        }
+        _ => {
+            let p = brain_path(&project)?;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&p)?;
+            use std::io::Write;
+            writeln!(file, "\n{}", text)?;
+            println!("appended to brain.md (direct)");
+        }
     }
-    existing.push_str(text.trim_end());
-    existing.push('\n');
-    std::fs::write(&p, existing)?;
-    println!("appended to {}", p.display());
     Ok(())
 }
 
@@ -676,9 +770,11 @@ async fn cmd_critic_run(
     no_proxy: bool,
 ) -> Result<()> {
     let root = project.canonicalize()?;
-    let runner = handoff_critic::CriticRunner::new(&root)?
+    let policy = handoff_policy::load(&root).unwrap_or_default();
+    let mut runner = handoff_critic::CriticRunner::new(&root)?
         .with_agents(worker.clone(), critic.clone())
         .with_proxy(if no_proxy { None } else { Some(proxy_url()) });
+    runner.max_rounds = Some(policy.critic.max_rounds);
     let res = runner.run(task).await?;
     println!("verdict: {}", res.verdict);
     println!("notes: {}", res.notes);
@@ -968,3 +1064,153 @@ async fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json:
 fn _ak_keepalive() -> Option<AgentKind> {
     AgentKind::parse("claude")
 }
+
+#[derive(Subcommand, Debug)]
+enum WorktreeCmd {
+    /// List all active worktrees.
+    List,
+    /// View the diff of a specific agent's worktree.
+    Diff { agent_id: i64 },
+    /// Remove a specific agent's worktree.
+    Clean { agent_id: i64 },
+}
+
+fn cmd_worktree(cmd: WorktreeCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    match cmd {
+        WorktreeCmd::List => {
+            let list = handoff_daemon::worktree::list(&root)?;
+            if list.is_empty() {
+                println!("no worktrees found");
+            } else {
+                for p in list {
+                    println!("{}", p.display());
+                }
+            }
+        }
+        WorktreeCmd::Diff { agent_id } => {
+            let d = handoff_daemon::worktree::diff(agent_id)?;
+            println!("{d}");
+        }
+        WorktreeCmd::Clean { agent_id } => {
+            handoff_daemon::worktree::remove(&root, agent_id)?;
+            println!("removed worktree for agent-{agent_id}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand, Debug)]
+enum HookCmd {
+    /// Install a hook for a specific agent.
+    Install { agent: String },
+    /// Uninstall a hook for a specific agent.
+    Uninstall { agent: String },
+}
+
+fn cmd_hook(cmd: HookCmd) -> Result<()> {
+    match cmd {
+        HookCmd::Install { agent } => {
+            if agent == "claude" {
+                let settings = dirs::home_dir().unwrap().join(".claude/settings.json");
+                handoff_cli::hook::install_claude("http://127.0.0.1:7879", &settings)?;
+            } else {
+                eprintln!("Hook install for '{}' not yet supported", agent);
+            }
+        }
+        HookCmd::Uninstall { agent } => {
+            if agent == "claude" {
+                let settings = dirs::home_dir().unwrap().join(".claude/settings.json");
+                handoff_cli::hook::uninstall_claude(&settings)?;
+            } else {
+                eprintln!("Hook uninstall for '{}' not yet supported", agent);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_logs(target: String, agent_id: Option<i64>, follow: bool) -> Result<()> {
+    let path = match target.as_str() {
+        "daemon" => handoff_common::home_dir().join("logs").join("daemon.log"),
+        "proxy" => handoff_common::home_dir().join("logs").join("proxy.log"),
+        "agent" => {
+            let aid = agent_id.ok_or_else(|| anyhow!("agent_id required for target 'agent'"))?;
+            handoff_common::tee::tee_path(aid)
+        }
+        _ => return Err(anyhow!("invalid log target: {target}")),
+    };
+
+    if !path.exists() {
+        return Err(anyhow!("log file not found: {}", path.display()));
+    }
+
+    if follow {
+        std::process::Command::new("tail")
+            .args(["-f", &path.to_string_lossy()])
+            .status()?;
+    } else {
+        let content = std::fs::read_to_string(&path)?;
+        print!("{}", content);
+    }
+    Ok(())
+}
+
+async fn cmd_replay(handoff_id: i64) -> Result<()> {
+    let db = Database::open(&db_path())?;
+    let data = db.get_replay_data(handoff_id)?;
+    
+    println!("=== Handoff #{} Replay ===", data.handoff.id);
+    println!("Time:   {}", chrono::DateTime::from_timestamp(data.handoff.ts, 0).map(|ts| ts.to_rfc3339()).unwrap_or_else(|| "unknown".into()));
+    println!("Reason: {}", data.handoff.reason);
+    
+    if let Some(from) = data.from_agent {
+        println!("From:   {} (#{}) [status={}]", from.kind, from.id, from.status);
+    }
+    
+    if let Some(to) = data.to_agent {
+        println!("To:     {} (#{}) [pid={:?}]", to.kind, to.id, to.pid);
+    }
+    
+    if let Some(snap) = data.snapshot_content {
+        println!("\n--- Snapshot Content (first 20 lines) ---");
+        for line in snap.lines().take(20) {
+            println!("{}", line);
+        }
+        if snap.lines().count() > 20 {
+            println!("...");
+        }
+    }
+    
+    Ok(())
+}
+
+fn cmd_stats(days: u32, graph: bool) -> Result<()> {
+    let db = Database::open(&db_path())?;
+    let stats = db.daily_stats(days)?;
+    
+    println!("{:<12} {:<10} {:<10} {:<15} {:<10}", "Date", "Kind", "Requests", "Avg Tokens", "Handoffs");
+    println!("{}", "-".repeat(60));
+    
+    for s in stats {
+        let bar = if graph {
+            let filled = (s.avg_tokens_remaining.unwrap_or(0.0) / 1000.0) as usize;
+            format!(" [{}{}]", "█".repeat(filled.min(20)), " ".repeat(20 - filled.min(20)))
+        } else {
+            String::new()
+        };
+        
+        println!("{:<12} {:<10} {:<10} {:<15.0} {:<10}{}", 
+            s.date, 
+            s.kind, 
+            s.total_requests, 
+            s.avg_tokens_remaining.unwrap_or(0.0), 
+            s.handoff_count,
+            bar);
+    }
+    
+    Ok(())
+}
+
+
+

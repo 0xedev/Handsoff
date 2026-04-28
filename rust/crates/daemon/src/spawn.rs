@@ -12,7 +12,7 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use handoff_common::{home_dir, tee_dir};
+use handoff_common::{home_dir, tee_dir, AgentKind};
 use tokio::process::{Child, Command};
 
 pub fn proxy_env(proxy_url: &str) -> HashMap<String, String> {
@@ -31,43 +31,51 @@ pub fn proxy_env(proxy_url: &str) -> HashMap<String, String> {
     env
 }
 
-fn argv_for(kind: &str, prompt: &str) -> Option<Vec<String>> {
-    match kind {
-        "claude" => Some(vec!["claude".into(), "-p".into(), prompt.into()]),
-        "codex" => Some(vec!["codex".into(), "exec".into(), prompt.into()]),
-        "copilot" => Some(vec![
-            "gh".into(),
-            "copilot".into(),
-            "suggest".into(),
-            prompt.into(),
-        ]),
-        _ => None,
-    }
-}
+
 
 /// Spawn an agent in one-shot mode with `prompt` as input. Stdout/stderr
 /// are tee'd to `~/.handoff/tee/agent-<kind>-<ts>.log`. Returns
 /// `Ok(None)` for agents (e.g. cursor) that have no headless form.
 pub async fn headless_spawn(
+    agent_id: i64,
     kind: &str,
     project_root: &Path,
     prompt: &str,
     proxy_url: &str,
+    use_worktree: bool,
 ) -> Result<Option<Child>> {
-    let Some(argv) = argv_for(kind, prompt) else {
+    let mut effective_root = project_root.to_path_buf();
+    if use_worktree {
+        effective_root = crate::worktree::create(project_root, agent_id)?;
+    }
+
+    let kind_enum = AgentKind::parse(kind)
+        .ok_or_else(|| anyhow!("invalid agent kind: {kind}"))?;
+    let adapter = handoff_adapters::for_kind(kind_enum);
+    let args = adapter.headless_args(prompt);
+
+    let Some(args) = args else {
         return Ok(None);
     };
-    let log_path = tee_dir().join(format!(
-        "agent-{kind}-{}.log",
-        Utc::now().timestamp()
-    ));
-    let log = std::fs::File::create(&log_path)
-        .map_err(|e| anyhow!("creating tee log {}: {e}", log_path.display()))?;
+
+    let bin = adapter.binaries()[0];
+
+    let log_path = handoff_common::tee::tee_path(agent_id);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = handoff_common::tee::rotate_if_needed(&log_path);
+
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| anyhow!("opening tee log {}: {e}", log_path.display()))?;
     let log_stderr = log.try_clone()?;
 
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .current_dir(project_root)
+    let mut cmd = Command::new(bin);
+    cmd.args(&args)
+        .current_dir(effective_root)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_stderr));
     for (k, v) in proxy_env(proxy_url) {
@@ -80,14 +88,6 @@ pub async fn headless_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn argv_known_kinds() {
-        assert!(argv_for("claude", "hello").is_some());
-        assert!(argv_for("codex", "hello").is_some());
-        assert!(argv_for("copilot", "hello").is_some());
-        assert!(argv_for("cursor", "hello").is_none());
-    }
 
     #[test]
     fn proxy_env_sets_all_keys() {

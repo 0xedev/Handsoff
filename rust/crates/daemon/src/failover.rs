@@ -100,7 +100,25 @@ impl FailoverEngine {
         if !trigger.fired {
             return Ok(());
         }
-        let next_kind = match pick_next(&policy.failover.chain, Some(&ev.kind)) {
+
+        let samples: Vec<handoff_policy::RateSampleInput> = policy
+            .failover
+            .chain
+            .iter()
+            .filter_map(|kind| {
+                self.db
+                    .latest_rate_sample_for_kind(kind)
+                    .ok()
+                    .flatten()
+                    .map(|s| handoff_policy::RateSampleInput {
+                        kind: kind.clone(),
+                        tokens_remaining: s.tokens_remaining.unwrap_or(0),
+                        tokens_reset_at: s.tokens_reset_at,
+                    })
+            })
+            .collect();
+
+        let next_kind = match pick_next(&policy.failover.chain, &ev.kind, &samples) {
             Some(k) => k.to_string(),
             None => return Ok(()),
         };
@@ -124,6 +142,7 @@ impl FailoverEngine {
             &trigger.reason,
             policy.failover.auto_spawn,
             policy.failover.summarize,
+            policy.failover.use_worktree,
         )
         .await?;
         Ok(())
@@ -149,6 +168,7 @@ impl FailoverEngine {
             reason,
             auto_spawn,
             policy.failover.summarize,
+            policy.failover.use_worktree,
         )
         .await
     }
@@ -162,6 +182,7 @@ impl FailoverEngine {
         reason: &str,
         auto_spawn: bool,
         summarize: bool,
+        use_worktree: bool,
     ) -> Result<HandoffOutcome> {
         let engine = ContextEngine::new(project_root);
         let (mut snap, _md_path) = engine.snapshot(reason)?;
@@ -185,21 +206,24 @@ impl FailoverEngine {
         let mut new_agent_id: Option<i64> = None;
         let mut new_pid: Option<u32> = None;
         if auto_spawn {
+            // Insert agent record first to get an ID for the worktree
+            let aid = self.db.insert_agent(
+                project_id,
+                to_kind,
+                None, // PID unknown yet
+                "handoff",
+            )?;
+            new_agent_id = Some(aid);
+
             let prompt = format!(
                 "Resuming work. Read this snapshot first: {}",
                 snap_path_str
             );
-            match headless_spawn(to_kind, project_root, &prompt, &self.proxy_url).await {
+            match headless_spawn(aid, to_kind, project_root, &prompt, &self.proxy_url, use_worktree).await {
                 Ok(Some(child)) => {
                     new_pid = child.id();
                     if let Some(pid) = new_pid {
-                        let aid = self.db.insert_agent(
-                            project_id,
-                            to_kind,
-                            Some(pid as i64),
-                            "handoff",
-                        )?;
-                        new_agent_id = Some(aid);
+                        self.db.update_agent_pid(aid, pid as i64)?;
                     }
                 }
                 Ok(None) => {
