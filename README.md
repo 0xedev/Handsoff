@@ -11,22 +11,18 @@ Copilot CLI, Cursor / Antigravity). Single-binary Rust.
 - **shares** a single project brain across all of them
 - **fails over** to a fresh agent when the active one approaches its limit,
   with a critic-summarised handoff brief
-- **runs** an internal cheap-worker / expensive-critic loop (Haiku worker,
-  Opus critic) when you want supervised autonomous edits
+- **runs** an internal cheap-worker / expensive-critic loop when you want supervised autonomous edits
+
+**handoff proxy + failover** require no API key — they observe rate-limit headers and redirect your agent processes.
+
+**handoff critic** uses the Anthropic API (set `ANTHROPIC_API_KEY`). Worker model: `claude-haiku-4-5`, Critic: `claude-opus-4`.
 
 ## Status
 
 v0.4.1-alpha — alpha-bugfix release.
 47 tests, all passing.
 
-**Product rule:** *handoff orchestrates local agents you already have
-installed and authenticated. It never requires a provider API key.*
-
 What's new since v0.4.0-alpha:
-- **Critic loop now drives local CLIs** (`claude -p`, `codex exec`,
-  `gh copilot suggest`). No more `ANTHROPIC_API_KEY` requirement —
-  the critic is just two more agent invocations that flow through the
-  same proxy as everything else.
 - **macOS PID attribution fix.** `lsof -i:<port>` returns both ends of
   a localhost MITM connection; we now match by **local** endpoint so
   the agent's PID gets recorded, not the proxy's own.
@@ -75,6 +71,13 @@ handoff doctor                                  # preflight check
      claude                  codex                  copilot         cursor/antigravity
                                                                     (companion extension)
 ```
+
+## Privacy
+
+- The MITM proxy logs response **headers only** — never request or response bodies.
+- Rate-limit headers (`anthropic-ratelimit-*`, `x-ratelimit-*`) are stored in `~/.handoff/state.db`.
+- Snapshots written to `<project>/.handoff/scratch/` are local-only; nothing is sent to any server.
+- To delete all state: `rm -rf ~/.handoff && rm -rf <project>/.handoff`
 
 ## Workspace layout
 

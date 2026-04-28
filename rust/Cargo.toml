@@ -18,7 +18,7 @@ edition = "2021"
 rust-version = "1.80"
 license = "MIT"
 authors = ["0xedev"]
-repository = "https://github.com/0xedev/handsoff"
+repository = "https://github.com/0xedev/handoff"
 
 [workspace.dependencies]
 # Internal crates
