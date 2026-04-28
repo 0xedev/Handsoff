@@ -526,25 +526,13 @@ fn build_spawn_argv(
             argv.extend(user_args.iter().cloned());
         }
         SpawnMode::Headless => {
-            // Treat user_args as a single prompt. Most agents take it as one
-            // string after their headless flag.
+            // Treat user_args as a single prompt.
             let prompt = user_args.join(" ");
-            match kind {
-                "claude" => {
-                    argv.push("-p".into());
-                    argv.push(prompt);
+            match adapter.headless_args(&prompt) {
+                Some(specific_args) => {
+                    argv.extend(specific_args);
                 }
-                "codex" => {
-                    argv.push("exec".into());
-                    argv.push(prompt);
-                }
-                "copilot" => {
-                    // `gh copilot suggest <prompt>` — bin is `gh` already.
-                    argv.push("copilot".into());
-                    argv.push("suggest".into());
-                    argv.push(prompt);
-                }
-                "cursor" | _ => {
+                None => {
                     return Err(anyhow!(
                         "no headless form known for kind={kind}; \
                          pass --interactive or --no-proxy and craft your own argv"

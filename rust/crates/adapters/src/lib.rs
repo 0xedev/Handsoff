@@ -68,6 +68,11 @@ pub trait Adapter: Send + Sync {
 
     /// Parse rate-limit headers; return None if not applicable.
     fn parse_headers(&self, headers: &BTreeMap<String, String>) -> Option<RateSample>;
+
+    /// Returns arguments to append to the resolved binary for headless execution.
+    fn headless_args(&self, _prompt: &str) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// Parse a header that's either ISO-8601, a duration like "5s", or epoch/seconds.
@@ -169,6 +174,9 @@ impl Adapter for ClaudeAdapter {
             raw_headers: raw,
         })
     }
+    fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
+        Some(vec!["-p".into(), prompt.into()])
+    }
 }
 
 impl Adapter for CodexAdapter {
@@ -208,6 +216,9 @@ impl Adapter for CodexAdapter {
                 .and_then(|v| parse_reset_epoch(v)),
             raw_headers: raw,
         })
+    }
+    fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
+        Some(vec!["exec".into(), prompt.into()])
     }
 }
 
@@ -257,6 +268,9 @@ impl Adapter for CopilotAdapter {
     fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> {
         // Copilot headers are opaque; daemon counts requests instead.
         None
+    }
+    fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
+        Some(vec!["copilot".into(), "suggest".into(), prompt.into()])
     }
 }
 
