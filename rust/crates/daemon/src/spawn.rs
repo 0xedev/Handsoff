@@ -1,19 +1,26 @@
 //! Headless agent spawn for failover.
 //!
-//! Each agent has a different one-shot CLI form:
-//!     claude:  claude -p "<prompt>"
-//!     codex:   codex exec "<prompt>"
-//!     copilot: gh copilot suggest "<prompt>"
-//!     cursor:  not supported (IDE-only)
+//! `headless_spawn()` resolves the right binary and CLI args via the
+//! `Adapter` trait (see `handoff_adapters::for_kind_str`), verifies the
+//! binary is on PATH, then launches it with the proxy env and tee logging.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
-use handoff_common::{home_dir, tee_dir, AgentKind};
+use handoff_common::home_dir;
 use tokio::process::{Child, Command};
+
+/// Returns true if `bin` resolves to an executable file anywhere in `$PATH`.
+fn binary_on_path(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path_var| {
+            std::env::split_paths(&path_var)
+                .any(|dir| dir.join(bin).is_file())
+        })
+        .unwrap_or(false)
+}
 
 pub fn proxy_env(proxy_url: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -49,9 +56,10 @@ pub async fn headless_spawn(
         effective_root = crate::worktree::create(project_root, agent_id)?;
     }
 
-    let kind_enum = AgentKind::parse(kind)
-        .ok_or_else(|| anyhow!("invalid agent kind: {kind}"))?;
-    let adapter = handoff_adapters::for_kind(kind_enum);
+    // Unknown kinds (e.g. "simulated" from tests) return Ok(None) gracefully.
+    let Some(adapter) = handoff_adapters::for_kind_str(kind) else {
+        return Ok(None);
+    };
     let args = adapter.headless_args(prompt);
 
     let Some(args) = args else {
@@ -59,6 +67,14 @@ pub async fn headless_spawn(
     };
 
     let bin = adapter.binaries()[0];
+
+    // Verify the binary is on PATH before attempting spawn.
+    if !binary_on_path(bin) {
+        anyhow::bail!(
+            "agent binary '{}' not found on PATH; install it before using handoff spawn",
+            bin
+        );
+    }
 
     let log_path = handoff_common::tee::tee_path(agent_id);
     if let Some(parent) = log_path.parent() {
@@ -94,5 +110,16 @@ mod tests {
         let env = proxy_env("http://127.0.0.1:8080");
         assert!(env.contains_key("HTTPS_PROXY"));
         assert!(env.contains_key("http_proxy"));
+    }
+
+    #[test]
+    fn binary_on_path_finds_sh() {
+        // `sh` is present on every POSIX system.
+        assert!(binary_on_path("sh"), "expected 'sh' to be on PATH");
+    }
+
+    #[test]
+    fn binary_on_path_rejects_nonexistent() {
+        assert!(!binary_on_path("__handoff_no_such_binary_xyz__"));
     }
 }

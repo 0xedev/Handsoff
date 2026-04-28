@@ -1,3 +1,9 @@
+//! First-time setup and teardown for the handoff tool.
+//!
+//! `run_setup()` scaffolds project state, generates the CA certificate, and
+//! installs it into the OS trust store so the MITM proxy can intercept HTTPS.
+//! `run_teardown()` revokes the CA and cleans up system trust entries.
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 use anyhow::Result;
@@ -66,7 +72,46 @@ pub async fn run_setup(path: Option<&str>) -> Result<()> {
     }
 
     println!("\nSetup complete! You can now run agents through the proxy:");
+    println!("  handoff daemon start");
+    println!("  handoff proxy start");
     println!("  handoff spawn claude");
-    
+
+    Ok(())
+}
+
+/// Remove the handoff CA from the system trust store and clean up state.
+///
+/// Does not delete `brain.md` or snapshots — only trust store and generated certs.
+pub async fn run_teardown() -> Result<()> {
+    println!("Removing handoff CA from system trust store...");
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("sudo")
+            .args(["security", "delete-certificate", "-c", "handoff", "/Library/Keychains/System.keychain"])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("  ✓ CA removed from macOS Keychain"),
+            _ => println!("  ⚠ Could not remove CA automatically. Open Keychain Access and delete 'handoff'."),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let cert_dest = "/usr/local/share/ca-certificates/handoff.crt";
+        let _ = Command::new("sudo").args(["rm", "-f", cert_dest]).status();
+        let _ = Command::new("sudo").arg("update-ca-certificates").status();
+        println!("  ✓ CA removed from Linux trust store");
+    }
+
+    // Remove the generated cert/key
+    let ca_dir = handoff_common::home_dir().join("ca");
+    if ca_dir.exists() {
+        std::fs::remove_dir_all(&ca_dir)?;
+        println!("  ✓ Deleted {}", ca_dir.display());
+    }
+
+    println!("\nNote: brain.md and snapshots are preserved in .handoff/");
+    println!("To fully remove all state: rm -rf ~/.handoff");
     Ok(())
 }

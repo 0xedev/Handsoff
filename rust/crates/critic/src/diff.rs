@@ -37,7 +37,7 @@ pub fn extract_diffs(text: &str) -> Vec<String> {
 }
 
 pub fn apply_check(diff: &str, project_root: &Path) -> bool {
-    let mut child = std::process::Command::new("git")
+    let child = std::process::Command::new("git")
         .args(["apply", "--check", "-"])
         .current_dir(project_root)
         .stdin(Stdio::piped())

@@ -8,13 +8,39 @@ fn worktree_dir(agent_id: i64) -> PathBuf {
         .join(format!("agent-{}", agent_id))
 }
 
+/// Returns true if the worktree for `agent_id` has uncommitted changes.
+fn has_uncommitted_changes(agent_id: i64) -> bool {
+    let wt = worktree_dir(agent_id);
+    if !wt.exists() {
+        return false;
+    }
+    Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&wt)
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 pub fn create(project_root: &Path, agent_id: i64) -> Result<PathBuf> {
     let dest = worktree_dir(agent_id);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Ensure we don't have a stale worktree
+    // Refuse to clobber an existing worktree that has uncommitted work.
+    if dest.exists() && has_uncommitted_changes(agent_id) {
+        anyhow::bail!(
+            "worktree for agent {} has uncommitted changes at {}; \
+             run `handoff worktree diff {}` to inspect or `handoff worktree clean {}` to discard",
+            agent_id,
+            dest.display(),
+            agent_id,
+            agent_id,
+        );
+    }
+
+    // Remove stale (clean) worktree before recreating.
     let _ = remove(project_root, agent_id);
 
     let status = Command::new("git")

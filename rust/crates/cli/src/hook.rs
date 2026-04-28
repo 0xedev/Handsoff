@@ -1,26 +1,70 @@
+//! Claude Code `PreToolUse` hook integration.
+//!
+//! Claude Code hooks receive a JSON payload on **stdin** (not env vars). The
+//! hook command is a shell string; stdin is piped in automatically. We write a
+//! small shell script to `~/.handoff/hooks/pretooluse.sh` and configure the
+//! agent's settings.json to call it.
+
 use anyhow::Result;
 use std::path::Path;
 
-/// Write Claude Code PreToolUse hook config
+/// The hook script reads the JSON Claude Code sends on stdin, extracts the
+/// tool name, uses $PPID as the agent PID (the hook is a child of claude),
+/// and POSTs to the handoff daemon.
+fn hook_script(daemon_url: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env sh
+# handoff PreToolUse hook
+# Claude Code pipes a JSON payload to stdin; $PPID is the claude process.
+payload=$(cat)
+tool_name=$(printf '%s' "$payload" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tool_name','unknown'))" \
+  2>/dev/null || echo "unknown")
+curl -s -X POST {url}/hook \
+  -H 'Content-Type: application/json' \
+  -d "{{\"agent_pid\": $PPID, \"tool_name\": \"$tool_name\"}}" \
+  >/dev/null 2>&1 || true
+"#,
+        url = daemon_url
+    )
+}
+
+/// Install the PreToolUse hook for Claude Code.
+///
+/// Writes a self-contained shell script to `~/.handoff/hooks/pretooluse.sh`
+/// and registers it in `settings_path` (typically `~/.claude/settings.json`).
 pub fn install_claude(daemon_url: &str, settings_path: &Path) -> Result<()> {
+    // Write the hook script
+    let hooks_dir = handoff_common::home_dir().join("hooks");
+    std::fs::create_dir_all(&hooks_dir)?;
+    let script_path = hooks_dir.join("pretooluse.sh");
+    std::fs::write(&script_path, hook_script(daemon_url))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Read / update Claude Code settings.json
     let settings_str = std::fs::read_to_string(settings_path).unwrap_or_else(|_| "{}".to_string());
     let mut settings: serde_json::Value = serde_json::from_str(&settings_str)?;
 
-    let hook_cmd = format!(
-        "curl -s -X POST {}/hook -H 'Content-Type: application/json' -d '{{\"agent_pid\": $CLAUDE_PID, \"tool_name\": \"$TOOL_NAME\"}}'",
-        daemon_url
-    );
+    // Claude Code hook format: hooks.PreToolUse = [{ command: "..." }]
+    let cmd = script_path.to_string_lossy().to_string();
+    settings["hooks"]["PreToolUse"] = serde_json::json!([{"command": cmd}]);
 
-    settings["hooks"]["PreToolUse"] = serde_json::json!([{"command": hook_cmd}]);
-    
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(settings_path, serde_json::to_string_pretty(&settings)?)?;
-    println!("Hook installed in {}", settings_path.display());
+
+    println!("Hook script: {}", script_path.display());
+    println!("Hook registered in {}", settings_path.display());
     Ok(())
 }
 
+/// Remove the PreToolUse hook from Claude Code settings.
 pub fn uninstall_claude(settings_path: &Path) -> Result<()> {
     if !settings_path.exists() {
         return Ok(());
@@ -33,4 +77,26 @@ pub fn uninstall_claude(settings_path: &Path) -> Result<()> {
     std::fs::write(settings_path, serde_json::to_string_pretty(&settings)?)?;
     println!("Hook removed from {}", settings_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_script_reads_stdin_not_env_vars() {
+        let script = hook_script("http://127.0.0.1:7879");
+        // Must use stdin (cat), not undefined env vars
+        assert!(script.contains("payload=$(cat)"));
+        assert!(script.contains("$PPID"));
+        assert!(!script.contains("$CLAUDE_PID"));
+        assert!(!script.contains("$TOOL_NAME"));
+    }
+
+    #[test]
+    fn hook_script_contains_correct_url() {
+        let s = hook_script("http://localhost:9999");
+        assert!(s.contains("http://localhost:9999/hook"));
+        assert!(s.contains("python3"));
+    }
 }

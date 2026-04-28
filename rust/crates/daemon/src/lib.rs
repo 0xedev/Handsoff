@@ -135,15 +135,16 @@ async fn list_handoffs_http(
 
 #[derive(serde::Deserialize, Default)]
 struct EventsParams {
-    since: Option<u64>,
+    since: Option<i64>,
 }
 
 async fn list_events_http(
-    State(_state): State<AppState>,
-    Query(_params): Query<EventsParams>,
+    State(state): State<AppState>,
+    Query(params): Query<EventsParams>,
 ) -> Json<serde_json::Value> {
-    // Stub
-    Json(serde_json::json!({"events": []}))
+    let since = params.since.unwrap_or(0);
+    let events = state.db.list_events_since(since).unwrap_or_default();
+    Json(serde_json::json!({"events": events}))
 }
 
 #[derive(serde::Deserialize)]
@@ -165,7 +166,7 @@ async fn simulate_limit(
         tokens_remaining: payload.tokens,
         requests_remaining: payload.requests,
     };
-    state.events.send(ev).await.ok();
+    let _ = state.events.try_send(ev);
     (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 

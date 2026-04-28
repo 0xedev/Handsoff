@@ -50,15 +50,24 @@ chain = ["simulated", "codex"]
         
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Wait a bit for event to process
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
+    // Poll for the handoff row instead of sleeping a fixed duration.
+    // The failover engine processes events asynchronously; we retry every 50ms
+    // for up to 5 seconds before failing.
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM handoffs WHERE from_agent_id = ?1",
-        rusqlite::params![aid],
-        |r| r.get(0),
-    ).unwrap();
-    
-    assert_eq!(count, 1, "Handoff should have been recorded");
+    let mut count = 0i64;
+    for _ in 0..100 {
+        count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM handoffs WHERE from_agent_id = ?1",
+                rusqlite::params![aid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if count >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(count, 1, "Handoff should have been recorded within 5s");
 }

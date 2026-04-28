@@ -549,6 +549,65 @@ impl Database {
         )?;
         Ok(conn.last_insert_rowid())
     }
+
+    /// Return a timeline of structured events (handoffs + agent spawns) since
+    /// `since_ts` (Unix seconds). Used by the `/events` daemon endpoint.
+    pub fn list_events_since(&self, since_ts: i64) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+
+        // Recent handoffs
+        let mut stmt = conn.prepare(
+            "SELECT id, from_agent_id, to_agent_id, reason, ts FROM handoffs \
+             WHERE ts > ?1 ORDER BY ts DESC LIMIT 50",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![since_ts])?;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let from: Option<i64> = r.get(1)?;
+            let to: Option<i64> = r.get(2)?;
+            let reason: String = r.get(3)?;
+            let ts: i64 = r.get(4)?;
+            out.push(serde_json::json!({
+                "kind": "handoff",
+                "id": id,
+                "from_agent_id": from,
+                "to_agent_id": to,
+                "reason": reason,
+                "ts": ts,
+            }));
+        }
+
+        // Recent agent spawns
+        let mut stmt2 = conn.prepare(
+            "SELECT id, kind, pid, spawned_by, started_at FROM agents \
+             WHERE started_at > ?1 ORDER BY started_at DESC LIMIT 50",
+        )?;
+        let mut rows2 = stmt2.query(rusqlite::params![since_ts])?;
+        while let Some(r) = rows2.next()? {
+            let id: i64 = r.get(0)?;
+            let kind: String = r.get(1)?;
+            let pid: Option<i64> = r.get(2)?;
+            let spawned_by: String = r.get(3)?;
+            let ts: i64 = r.get(4)?;
+            out.push(serde_json::json!({
+                "kind": "agent_spawn",
+                "id": id,
+                "agent_kind": kind,
+                "pid": pid,
+                "spawned_by": spawned_by,
+                "ts": ts,
+            }));
+        }
+
+        // Sort all by ts descending
+        out.sort_by(|a, b| {
+            let ta = a["ts"].as_i64().unwrap_or(0);
+            let tb = b["ts"].as_i64().unwrap_or(0);
+            tb.cmp(&ta)
+        });
+        Ok(out)
+    }
 }
 
 fn map_agent_row(row: &Row) -> rusqlite::Result<AgentRow> {

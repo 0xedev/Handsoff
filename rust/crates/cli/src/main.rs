@@ -121,6 +121,8 @@ enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Remove handoff CA from system trust store and clean up generated certs.
+    Teardown,
 
     /// Print the shell hook script to be evaluated
     InitHook,
@@ -335,6 +337,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Setup { project } => handoff_cli::setup::run_setup(project.as_deref()).await,
+        Cmd::Teardown => handoff_cli::setup::run_teardown().await,
         Cmd::InitHook => {
             let script = r#"
 handoff_wrap() {
@@ -717,7 +720,7 @@ fn cmd_brain_cat(project: PathBuf) -> Result<()> {
 
 async fn cmd_brain_edit(project: PathBuf) -> Result<()> {
     let p = brain_path(&project)?;
-    let root = project.canonicalize()?;
+    let _root = project.canonicalize()?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let status = std::process::Command::new(&editor).arg(&p).status()?;
     if !status.success() {

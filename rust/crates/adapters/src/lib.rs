@@ -380,6 +380,11 @@ pub fn for_kind(kind: AgentKind) -> Box<dyn Adapter> {
     }
 }
 
+/// Look up an adapter by its string name. Returns `None` for unknown kinds.
+pub fn for_kind_str(kind: &str) -> Option<Box<dyn Adapter>> {
+    AgentKind::parse(kind).map(for_kind)
+}
+
 /// Snapshot the running process table via `sysinfo`.
 pub fn snapshot_procs() -> Vec<ProcInfo> {
     use sysinfo::{ProcessesToUpdate, System};
