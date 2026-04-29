@@ -1,6 +1,6 @@
+use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
-use std::io::Write;
 
 /// Extract unified diff blocks from a string
 pub fn extract_diffs(text: &str) -> Vec<String> {

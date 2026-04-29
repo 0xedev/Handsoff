@@ -5,7 +5,7 @@ pub async fn fetch_handoffs(daemon_url: &str) -> anyhow::Result<Vec<String>> {
         .await?
         .json::<serde_json::Value>()
         .await?;
-    
+
     let mut out = Vec::new();
     if let Some(arr) = resp["handoffs"].as_array() {
         for row in arr {

@@ -15,12 +15,12 @@ Copilot CLI, Cursor / Antigravity). Single-binary Rust.
 
 **handoff proxy + failover** require no API key — they observe rate-limit headers and redirect your agent processes.
 
-**handoff critic** uses the Anthropic API (set `ANTHROPIC_API_KEY`). Worker model: `claude-haiku-4-5`, Critic: `claude-opus-4`.
+**handoff critic** uses your local agent CLIs (`claude`, `codex`, `gh copilot`) for both worker and critic roles. No separate API key is required.
 
 ## Status
 
 v0.4.1-alpha — alpha-bugfix release.
-47 tests, all passing.
+56 Rust tests, all passing.
 
 What's new since v0.4.0-alpha:
 - **macOS PID attribution fix.** `lsof -i:<port>` returns both ends of
@@ -89,7 +89,7 @@ rust/
     daemon/     axum HTTP + ingest + RPC + failover engine
     proxy/      hudsucker MITM + on-disk CA + PID-from-socket lookup
     context/    brain.md + intelligent Snapshot from git/shell/tests
-    critic/     reqwest → Anthropic worker/critic/summariser + watch loop
+    critic/     local CLI worker/critic/summariser + watch loop
     policy/     declarative thresholds + chain
     adapters/   per-agent detection + rate-limit header parsing
     storage/    rusqlite schema + queries
@@ -133,7 +133,7 @@ tokens_remaining_abs = 1000       # OR absolute tokens
 requests_remaining = 5            # OR remaining requests
 chain = ["claude", "codex", "copilot"]
 auto_spawn = true
-summarize = true                  # use critic model for handoff brief
+summarize = true                  # use critic agent for handoff brief
 
 [critic]
 worker_agent     = "claude"        # local CLI: claude | codex | copilot

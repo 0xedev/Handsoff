@@ -13,8 +13,7 @@ use regex::Regex;
 static PYTEST_FAILED: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"FAILED ([^:]+)::([\w\[\]:.+-]+)(?: - )?(.*)").unwrap());
 
-static JEST_FAILED: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"●\s+(.+?)\s*$").unwrap());
+static JEST_FAILED: Lazy<Regex> = Lazy::new(|| Regex::new(r"●\s+(.+?)\s*$").unwrap());
 
 static CARGO_FAILED: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)^\s*test ([\w:]+) \.\.\. FAILED").unwrap());
@@ -34,16 +33,29 @@ pub fn parse(body: &str) -> Vec<TestFailure> {
     // Pytest
     for cap in PYTEST_FAILED.captures_iter(body) {
         let file = cap.get(1).map(|m| m.as_str().to_string());
-        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let msg = cap.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+        let name = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        let msg = cap
+            .get(3)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
         if !name.is_empty() {
-            out.push(TestFailure { name, file, message: msg });
+            out.push(TestFailure {
+                name,
+                file,
+                message: msg,
+            });
         }
     }
 
     // Cargo
     for cap in CARGO_FAILED.captures_iter(body) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         if !name.is_empty() {
             out.push(TestFailure {
                 name,
@@ -55,7 +67,10 @@ pub fn parse(body: &str) -> Vec<TestFailure> {
 
     // Jest (very rough)
     for cap in JEST_FAILED.captures_iter(body) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         if !name.is_empty() && !out.iter().any(|t| t.name == name) {
             out.push(TestFailure {
                 name,
@@ -84,7 +99,8 @@ mod test {
 
     #[test]
     fn parses_cargo_failures() {
-        let body = "running 3 tests\ntest module::test_one ... ok\ntest module::test_two ... FAILED\n";
+        let body =
+            "running 3 tests\ntest module::test_one ... ok\ntest module::test_two ... FAILED\n";
         let r = parse(body);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].name, "module::test_two");

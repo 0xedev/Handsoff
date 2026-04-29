@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Policy {
     #[serde(default)]
     pub failover: FailoverPolicy,
@@ -23,7 +23,6 @@ pub struct RateSampleInput {
     pub tokens_remaining: i64,
     pub tokens_reset_at: Option<i64>,
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FailoverPolicy {
@@ -65,7 +64,6 @@ fn default_max_rounds() -> u32 {
     3
 }
 
-
 fn default_pct() -> f64 {
     10.0
 }
@@ -83,15 +81,6 @@ fn default_worker() -> String {
 }
 fn default_critic() -> String {
     "claude".into()
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            failover: FailoverPolicy::default(),
-            critic: CriticPolicy::default(),
-        }
-    }
 }
 
 impl Default for FailoverPolicy {

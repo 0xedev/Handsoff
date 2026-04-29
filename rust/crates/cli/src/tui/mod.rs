@@ -31,7 +31,10 @@ pub async fn run(daemon_url: &str) -> anyhow::Result<()> {
     result
 }
 
-async fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, daemon_url: &str) -> anyhow::Result<()> {
+async fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    daemon_url: &str,
+) -> anyhow::Result<()> {
     let mut view = View::Agents;
 
     loop {
@@ -56,7 +59,11 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, daemo
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') => break,
                     KeyCode::Tab => {
-                        view = if view == View::Agents { View::Timeline } else { View::Agents };
+                        view = if view == View::Agents {
+                            View::Timeline
+                        } else {
+                            View::Agents
+                        };
                     }
                     _ => {}
                 }

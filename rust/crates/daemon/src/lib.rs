@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    extract::{State, Query},
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -129,7 +129,10 @@ async fn list_handoffs_http(
     Query(params): Query<PaginationParams>,
 ) -> Json<serde_json::Value> {
     let limit = params.limit.unwrap_or(5);
-    let rows = state.db.list_handoffs_recent(limit as i64).unwrap_or_default();
+    let rows = state
+        .db
+        .list_handoffs_recent(limit as i64)
+        .unwrap_or_default();
     Json(serde_json::json!({"handoffs": rows}))
 }
 
@@ -166,8 +169,14 @@ async fn simulate_limit(
         tokens_remaining: payload.tokens,
         requests_remaining: payload.requests,
     };
-    let _ = state.events.try_send(ev);
+    send_failover_event(&state.events, ev).await;
     (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+}
+
+async fn send_failover_event(tx: &Sender<RateEvent>, ev: RateEvent) {
+    if let Err(e) = tx.send(ev).await {
+        warn!("failover event enqueue failed: {e}");
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -195,7 +204,7 @@ async fn ingest(
                 tokens_remaining: sample.tokens_remaining,
                 requests_remaining: sample.requests_remaining,
             };
-            let _ = s.events.try_send(ev);
+            send_failover_event(&s.events, ev).await;
         } else if payload.status_code == 429 {
             // Opaque-provider failover trigger.
             let ev = RateEvent {
@@ -204,16 +213,10 @@ async fn ingest(
                 tokens_remaining: Some(0),
                 requests_remaining: Some(0),
             };
-            let _ = s.events.try_send(ev);
+            send_failover_event(&s.events, ev).await;
         }
     }
-    (
-        StatusCode::OK,
-        Json(IngestResponse {
-            ok: true,
-            agent_id,
-        }),
-    )
+    (StatusCode::OK, Json(IngestResponse { ok: true, agent_id }))
 }
 
 fn resolve_agent_id(s: &AppState, payload: &IngestPayload) -> Result<Option<i64>> {
@@ -225,9 +228,8 @@ fn resolve_agent_id(s: &AppState, payload: &IngestPayload) -> Result<Option<i64>
         return Ok(Some(row.id));
     }
     let project_id = default_project(&s.db)?;
-    let aid = s
-        .db
-        .insert_agent(project_id, &payload.kind, Some(pid), "user")?;
+    let aid =
+        s.db.insert_agent(project_id, &payload.kind, Some(pid), "user")?;
     Ok(Some(aid))
 }
 
@@ -332,10 +334,9 @@ async fn rpc_handoff(s: &AppState, p: serde_json::Value) -> Result<serde_json::V
             None => default_project(&s.db)?,
         },
     };
-    let root = s
-        .db
-        .project_root(project_id)?
-        .ok_or_else(|| anyhow::anyhow!("project_id={project_id} has no root"))?;
+    let root =
+        s.db.project_root(project_id)?
+            .ok_or_else(|| anyhow::anyhow!("project_id={project_id} has no root"))?;
     let outcome = s
         .failover
         .execute(
@@ -356,14 +357,16 @@ async fn rpc_handoff(s: &AppState, p: serde_json::Value) -> Result<serde_json::V
 }
 
 fn rpc_record_critic_run(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Value> {
-    let worker_model = p
-        .get("worker_model")
+    let worker_agent = p
+        .get("worker_agent")
+        .or_else(|| p.get("worker_model"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("worker_model required"))?;
-    let critic_model = p
-        .get("critic_model")
+        .ok_or_else(|| anyhow::anyhow!("worker_agent required"))?;
+    let critic_agent = p
+        .get("critic_agent")
+        .or_else(|| p.get("critic_model"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("critic_model required"))?;
+        .ok_or_else(|| anyhow::anyhow!("critic_agent required"))?;
     let verdict = p
         .get("verdict")
         .and_then(|v| v.as_str())
@@ -375,15 +378,15 @@ fn rpc_record_critic_run(s: &AppState, p: &serde_json::Value) -> Result<serde_js
     let worker_tokens = p.get("worker_tokens").and_then(|v| v.as_u64());
     let critic_tokens = p.get("critic_tokens").and_then(|v| v.as_u64());
     let notes = p.get("notes").and_then(|v| v.as_str());
-    let id = s.db.insert_critic_run(
+    let id = s.db.insert_critic_run(handoff_storage::CriticRunInsert {
         project_id,
-        worker_model,
-        critic_model,
+        worker_agent,
+        critic_agent,
         worker_tokens,
         critic_tokens,
         verdict,
         notes,
-    )?;
+    })?;
     Ok(json!({"critic_run_id": id}))
 }
 
@@ -453,18 +456,29 @@ async fn brain_append(
     let path = std::path::Path::new(&payload.project_root)
         .join(".handoff")
         .join("brain.md");
-    
+
     use std::io::Write;
     let mut file = match std::fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .open(&path) {
-            Ok(f) => f,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to open brain.md: {e}")).into_response(),
-        };
-    
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to open brain.md: {e}"),
+            )
+                .into_response()
+        }
+    };
+
     if let Err(e) = writeln!(file, "\n{}", payload.text) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to write to brain.md: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to write to brain.md: {e}"),
+        )
+            .into_response();
     }
 
     StatusCode::OK.into_response()
@@ -478,9 +492,13 @@ async fn brain_edit(
     let path = std::path::Path::new(&payload.project_root)
         .join(".handoff")
         .join("brain.md");
-    
+
     if let Err(e) = std::fs::write(&path, &payload.content) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to write brain.md: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to write brain.md: {e}"),
+        )
+            .into_response();
     }
 
     StatusCode::OK.into_response()
@@ -490,4 +508,3 @@ async fn brain_edit(
 fn _adapters_keepalive() -> usize {
     all_adapters().len()
 }
-

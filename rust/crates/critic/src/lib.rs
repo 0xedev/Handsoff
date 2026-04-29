@@ -44,7 +44,6 @@ pub struct CriticResult {
 
 pub mod diff;
 
-
 pub struct CriticRunner {
     project_root: PathBuf,
     worker_agent: String,
@@ -71,11 +70,7 @@ impl CriticRunner {
         })
     }
 
-    pub fn with_agents(
-        mut self,
-        worker: impl Into<String>,
-        critic: impl Into<String>,
-    ) -> Self {
+    pub fn with_agents(mut self, worker: impl Into<String>, critic: impl Into<String>) -> Self {
         self.worker_agent = worker.into();
         self.critic_agent = critic.into();
         self
@@ -121,8 +116,7 @@ impl CriticRunner {
                 .ok_or_else(|| anyhow!("ran out of fake responses"));
         }
 
-        let argv = headless_argv(agent)
-            .ok_or_else(|| anyhow!("unsupported agent: {agent}"))?;
+        let argv = headless_argv(agent).ok_or_else(|| anyhow!("unsupported agent: {agent}"))?;
         let prompt = format!("{system}\n\n---\n\n{user}");
         let mut cmd = Command::new(argv[0]);
         cmd.args(&argv[1..])
@@ -247,7 +241,8 @@ impl CriticRunner {
             ));
         }
         prompt.push_str("\nProduce the handoff brief now.");
-        self.ask(&self.critic_agent, SUMMARIZER_SYSTEM, &prompt).await
+        self.ask(&self.critic_agent, SUMMARIZER_SYSTEM, &prompt)
+            .await
     }
 
     fn read_brain(&self) -> String {
@@ -264,9 +259,7 @@ impl CriticRunner {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
             .collect();
-        files.sort_by_key(|e| {
-            std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok())
-        });
+        files.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok()));
         files
             .iter()
             .take(limit)
@@ -378,7 +371,7 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut out = s[..max].to_string();
-        out.push_str("…");
+        out.push('…');
         out
     }
 }

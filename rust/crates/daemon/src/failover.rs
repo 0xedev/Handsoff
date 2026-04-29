@@ -48,6 +48,17 @@ pub struct FailoverEngine {
     initial_tokens: Mutex<HashMap<i64, i64>>,
 }
 
+struct ExecuteRequest<'a> {
+    from_agent_id: Option<i64>,
+    to_kind: &'a str,
+    project_root: &'a Path,
+    project_id: i64,
+    reason: &'a str,
+    auto_spawn: bool,
+    summarize: bool,
+    use_worktree: bool,
+}
+
 impl FailoverEngine {
     pub fn new(db: Arc<Database>, proxy_url: String) -> Self {
         Self {
@@ -134,16 +145,16 @@ impl FailoverEngine {
             "failover triggered: agent_id={} kind={} reason={} -> {}",
             ev.agent_id, ev.kind, trigger.reason, next_kind,
         );
-        self.execute_inner(
-            Some(ev.agent_id),
-            &next_kind,
-            &root,
+        self.execute_inner(ExecuteRequest {
+            from_agent_id: Some(ev.agent_id),
+            to_kind: &next_kind,
+            project_root: &root,
             project_id,
-            &trigger.reason,
-            policy.failover.auto_spawn,
-            policy.failover.summarize,
-            policy.failover.use_worktree,
-        )
+            reason: &trigger.reason,
+            auto_spawn: policy.failover.auto_spawn,
+            summarize: policy.failover.summarize,
+            use_worktree: policy.failover.use_worktree,
+        })
         .await?;
         Ok(())
     }
@@ -160,30 +171,31 @@ impl FailoverEngine {
         auto_spawn: bool,
     ) -> Result<HandoffOutcome> {
         let policy = load_policy(project_root).unwrap_or_default();
-        self.execute_inner(
+        self.execute_inner(ExecuteRequest {
             from_agent_id,
             to_kind,
             project_root,
             project_id,
             reason,
             auto_spawn,
-            policy.failover.summarize,
-            policy.failover.use_worktree,
-        )
+            summarize: policy.failover.summarize,
+            use_worktree: policy.failover.use_worktree,
+        })
         .await
     }
 
-    async fn execute_inner(
-        &self,
-        from_agent_id: Option<i64>,
-        to_kind: &str,
-        project_root: &Path,
-        project_id: i64,
-        reason: &str,
-        auto_spawn: bool,
-        summarize: bool,
-        use_worktree: bool,
-    ) -> Result<HandoffOutcome> {
+    async fn execute_inner(&self, req: ExecuteRequest<'_>) -> Result<HandoffOutcome> {
+        let ExecuteRequest {
+            from_agent_id,
+            to_kind,
+            project_root,
+            project_id,
+            reason,
+            auto_spawn,
+            summarize,
+            use_worktree,
+        } = req;
+
         let engine = ContextEngine::new(project_root);
         let (mut snap, _md_path) = engine.snapshot(reason)?;
         // Ask the critic agent for a focused brief if configured. Failure
@@ -208,18 +220,22 @@ impl FailoverEngine {
         if auto_spawn {
             // Insert agent record first to get an ID for the worktree
             let aid = self.db.insert_agent(
-                project_id,
-                to_kind,
-                None, // PID unknown yet
+                project_id, to_kind, None, // PID unknown yet
                 "handoff",
             )?;
             new_agent_id = Some(aid);
 
-            let prompt = format!(
-                "Resuming work. Read this snapshot first: {}",
-                snap_path_str
-            );
-            match headless_spawn(aid, to_kind, project_root, &prompt, &self.proxy_url, use_worktree).await {
+            let prompt = format!("Resuming work. Read this snapshot first: {}", snap_path_str);
+            match headless_spawn(
+                aid,
+                to_kind,
+                project_root,
+                &prompt,
+                &self.proxy_url,
+                use_worktree,
+            )
+            .await
+            {
                 Ok(Some(child)) => {
                     new_pid = child.id();
                     if let Some(pid) = new_pid {
@@ -233,12 +249,9 @@ impl FailoverEngine {
             }
         }
 
-        let handoff_id = self.db.insert_handoff(
-            from_agent_id,
-            new_agent_id,
-            reason,
-            Some(&snap_path_str),
-        )?;
+        let handoff_id =
+            self.db
+                .insert_handoff(from_agent_id, new_agent_id, reason, Some(&snap_path_str))?;
         Ok(HandoffOutcome {
             handoff_id,
             to_agent_id: new_agent_id,
@@ -257,7 +270,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("t.db");
         let db = Arc::new(Database::open(&db_path).unwrap());
-        let pid = db.upsert_project(&tmp.path().display().to_string()).unwrap();
+        let pid = db
+            .upsert_project(&tmp.path().display().to_string())
+            .unwrap();
 
         // Scaffold .handoff/ in the project root so snapshot/write succeed.
         std::fs::create_dir_all(tmp.path().join(".handoff").join("scratch")).unwrap();
@@ -273,7 +288,10 @@ chain = ["codex", "claude"]
         std::fs::write(tmp.path().join(".handoff").join("brain.md"), "# brain").unwrap();
 
         let aid = db.insert_agent(pid, "claude", Some(999), "user").unwrap();
-        let engine = Arc::new(FailoverEngine::new(db.clone(), "http://127.0.0.1:8080".into()));
+        let engine = Arc::new(FailoverEngine::new(
+            db.clone(),
+            "http://127.0.0.1:8080".into(),
+        ));
 
         let ev = RateEvent {
             agent_id: aid,

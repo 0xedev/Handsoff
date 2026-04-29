@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use handoff_common::home_dir;
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
-};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
 
 pub fn ca_dir() -> PathBuf {
     let dir = home_dir().join("ca");

@@ -37,7 +37,9 @@ fn fallback_walk(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let name = e.file_name();
             let name_s = name.to_string_lossy();
@@ -108,7 +110,9 @@ impl WatchLoop {
     pub fn tick(&mut self, now: f64) -> WatchTick {
         let mut changed = HashSet::new();
         for p in self.scan() {
-            let Ok(m) = p.metadata().and_then(|m| m.modified()) else { continue };
+            let Ok(m) = p.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
             let prev = self.mtimes.get(&p).copied();
             self.mtimes.insert(p.clone(), m);
             if let Some(prev_m) = prev {

@@ -108,21 +108,17 @@ impl HttpHandler for HandoffHandler {
     ) -> RequestOrResponse {
         // Stash the host for the response side; hudsucker's HttpContext
         // doesn't always carry the original host through to handle_response.
-        if let Some(host) = req
-            .uri()
-            .host()
-            .or_else(|| req.headers().get(http::header::HOST).and_then(|v| v.to_str().ok()))
-        {
+        if let Some(host) = req.uri().host().or_else(|| {
+            req.headers()
+                .get(http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+        }) {
             *self.last_host.lock().await = Some(host.to_string());
         }
         req.into()
     }
 
-    async fn handle_response(
-        &mut self,
-        ctx: &HttpContext,
-        res: Response<Body>,
-    ) -> Response<Body> {
+    async fn handle_response(&mut self, ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         let host = self.last_host.lock().await.clone().unwrap_or_default();
         let status = res.status();
 
@@ -153,24 +149,21 @@ impl HttpHandler for HandoffHandler {
 
 /// Bind on `addr` and serve until the listener is closed.
 pub async fn run(addr: SocketAddr, daemon_url: Option<String>) -> Result<()> {
-    let (cert_pem, key_pem) =
-        ca::load_or_create().context("loading or generating local CA")?;
+    let (cert_pem, key_pem) = ca::load_or_create().context("loading or generating local CA")?;
 
     // Convert PEM strings into rcgen types via re-parse — hudsucker's
     // `RcgenAuthority` wants a `KeyPair` + `Certificate`. We regenerate from
     // the persisted PEM so the runtime types are correct.
     let key_pair = KeyPair::from_pem(&key_pem).context("parsing CA key.pem")?;
-    let mut params = CertificateParams::from_ca_cert_pem(&cert_pem)
-        .context("parsing CA cert.pem")?;
+    let mut params =
+        CertificateParams::from_ca_cert_pem(&cert_pem).context("parsing CA cert.pem")?;
     let _ = &mut params; // already populated
     let cert = params.self_signed(&key_pair).context("self-signing")?;
 
     let provider = aws_lc_rs::default_provider();
     let ca = RcgenAuthority::new(key_pair, cert, CA_CACHE_SIZE, provider.clone());
 
-    let handler = HandoffHandler::new(
-        daemon_url.unwrap_or_else(|| DEFAULT_INGEST.to_string()),
-    );
+    let handler = HandoffHandler::new(daemon_url.unwrap_or_else(|| DEFAULT_INGEST.to_string()));
 
     let proxy = Proxy::builder()
         .with_addr(addr)

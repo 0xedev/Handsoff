@@ -34,11 +34,7 @@ pub fn tee_dir() -> PathBuf {
 pub fn xdg_config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .expect("no home dir")
-                .join(".config")
-        });
+        .unwrap_or_else(|_| dirs::home_dir().expect("no home dir").join(".config"));
     base.join("handoff").join("config.toml")
 }
 

@@ -1,9 +1,9 @@
 use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use handoff_daemon::build_router;
 use handoff_daemon::AppState;
 use handoff_storage::Database;
 use std::sync::Arc;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn simulate_limit_returns_ok() {
@@ -23,9 +23,10 @@ async fn simulate_limit_returns_ok() {
                         "agent_id": 1,
                         "tokens": 0,
                         "requests": 0
-                    })).unwrap()
+                    }))
+                    .unwrap(),
                 ))
-                .unwrap()
+                .unwrap(),
         )
         .await
         .unwrap();

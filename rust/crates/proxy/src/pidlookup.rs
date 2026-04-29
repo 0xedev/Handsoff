@@ -37,7 +37,9 @@ mod linux {
 
     fn read_inode(target: &str) -> Option<String> {
         for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-            let Ok(body) = std::fs::read_to_string(path) else { continue };
+            let Ok(body) = std::fs::read_to_string(path) else {
+                continue;
+            };
             for line in body.lines().skip(1) {
                 let parts: Vec<_> = line.split_whitespace().collect();
                 if parts.len() < 10 {
@@ -61,10 +63,16 @@ mod linux {
         for entry in std::fs::read_dir("/proc").ok()? {
             let Ok(entry) = entry else { continue };
             let pid_str = entry.file_name();
-            let Some(pid_s) = pid_str.to_str() else { continue };
-            let Ok(pid) = pid_s.parse::<i64>() else { continue };
+            let Some(pid_s) = pid_str.to_str() else {
+                continue;
+            };
+            let Ok(pid) = pid_s.parse::<i64>() else {
+                continue;
+            };
             let fd_dir = format!("/proc/{pid}/fd");
-            let Ok(fds) = std::fs::read_dir(&fd_dir) else { continue };
+            let Ok(fds) = std::fs::read_dir(&fd_dir) else {
+                continue;
+            };
             for fd in fds.flatten() {
                 if let Ok(target) = std::fs::read_link(fd.path()) {
                     if target.to_string_lossy() == needle {
@@ -146,7 +154,8 @@ mod tests {
         // BOTH the agent (local=60000) and our proxy (remote=60000) when
         // queried with -i:60000. We must return the agent's PID, not the
         // proxy's.
-        let stdout = "p73197\nn127.0.0.1:8080->127.0.0.1:60000\np73243\nn127.0.0.1:60000->127.0.0.1:8080\n";
+        let stdout =
+            "p73197\nn127.0.0.1:8080->127.0.0.1:60000\np73243\nn127.0.0.1:60000->127.0.0.1:8080\n";
         let peer: SocketAddr = "127.0.0.1:60000".parse().unwrap();
         assert_eq!(parse_lsof_pn(stdout, peer), Some(73243));
     }

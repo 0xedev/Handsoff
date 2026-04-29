@@ -213,7 +213,9 @@ impl Adapter for CodexAdapter {
             provider: "openai".into(),
             tokens_remaining: parse_int(&lc, "x-ratelimit-remaining-tokens"),
             requests_remaining: parse_int(&lc, "x-ratelimit-remaining-requests"),
-            tokens_reset_at: lc.get("x-ratelimit-reset-tokens").and_then(|v| parse_reset_epoch(v)),
+            tokens_reset_at: lc
+                .get("x-ratelimit-reset-tokens")
+                .and_then(|v| parse_reset_epoch(v)),
             requests_reset_at: lc
                 .get("x-ratelimit-reset-requests")
                 .and_then(|v| parse_reset_epoch(v)),
@@ -324,33 +326,63 @@ impl Adapter for CursorAdapter {
 }
 
 impl Adapter for GeminiAdapter {
-    fn kind(&self) -> AgentKind { AgentKind::Gemini }
-    fn binaries(&self) -> &'static [&'static str] { &["gemini"] }
-    fn api_hosts(&self) -> &'static [&'static str] { &["generativelanguage.googleapis.com"] }
-    fn context_files(&self, root: &Path) -> Vec<PathBuf> { vec![root.join("GEMINI.md")] }
-    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> { None }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Gemini
+    }
+    fn binaries(&self) -> &'static [&'static str] {
+        &["gemini"]
+    }
+    fn api_hosts(&self) -> &'static [&'static str] {
+        &["generativelanguage.googleapis.com"]
+    }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join("GEMINI.md")]
+    }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> {
+        None
+    }
     fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
         Some(vec!["-p".into(), prompt.into()])
     }
 }
 
 impl Adapter for AiderAdapter {
-    fn kind(&self) -> AgentKind { AgentKind::Aider }
-    fn binaries(&self) -> &'static [&'static str] { &["aider"] }
-    fn api_hosts(&self) -> &'static [&'static str] { &["api.openai.com", "api.anthropic.com"] }
-    fn context_files(&self, root: &Path) -> Vec<PathBuf> { vec![root.join(".aider.conf.yml")] }
-    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> { None }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Aider
+    }
+    fn binaries(&self) -> &'static [&'static str] {
+        &["aider"]
+    }
+    fn api_hosts(&self) -> &'static [&'static str] {
+        &["api.openai.com", "api.anthropic.com"]
+    }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join(".aider.conf.yml")]
+    }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> {
+        None
+    }
     fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
         Some(vec!["--message".into(), prompt.into(), "--yes".into()])
     }
 }
 
 impl Adapter for ClineAdapter {
-    fn kind(&self) -> AgentKind { AgentKind::Cline }
-    fn binaries(&self) -> &'static [&'static str] { &["cline"] }
-    fn api_hosts(&self) -> &'static [&'static str] { &[] }
-    fn context_files(&self, root: &Path) -> Vec<PathBuf> { vec![root.join(".clinerules")] }
-    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> { None }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Cline
+    }
+    fn binaries(&self) -> &'static [&'static str] {
+        &["cline"]
+    }
+    fn api_hosts(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join(".clinerules")]
+    }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> {
+        None
+    }
     fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
         Some(vec!["-p".into(), prompt.into()])
     }
@@ -441,11 +473,18 @@ mod tests {
     #[test]
     fn cursor_skips_electron_children() {
         let procs = vec![
-            proc(200, "Cursor", &["/Applications/Cursor.app/Contents/MacOS/Cursor"]),
+            proc(
+                200,
+                "Cursor",
+                &["/Applications/Cursor.app/Contents/MacOS/Cursor"],
+            ),
             proc(
                 201,
                 "Cursor Helper",
-                &["/Applications/Cursor.app/Contents/Frameworks/Helper", "--type=renderer"],
+                &[
+                    "/Applications/Cursor.app/Contents/Frameworks/Helper",
+                    "--type=renderer",
+                ],
             ),
         ];
         let m = CursorAdapter.detect(&procs);
@@ -464,7 +503,10 @@ mod tests {
     #[test]
     fn anthropic_headers_parse() {
         let mut h = BTreeMap::new();
-        h.insert("anthropic-ratelimit-tokens-remaining".into(), "120000".into());
+        h.insert(
+            "anthropic-ratelimit-tokens-remaining".into(),
+            "120000".into(),
+        );
         h.insert(
             "anthropic-ratelimit-tokens-reset".into(),
             "2026-04-26T10:00:00Z".into(),
