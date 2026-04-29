@@ -1,56 +1,38 @@
 # handoff
 
-Multi-agent orchestration CLI for AI coding agents (Claude Code, Codex CLI,
-Copilot CLI, Cursor / Antigravity). Single-binary Rust.
+`handoff` is a local control plane for AI coding agents.
 
-`handoff` runs a local daemon and an HTTPS-MITM proxy that:
+It runs quietly in the background and:
 
-- **observes** which AI coding agents are running on your machine
-- **meters** each one's API usage in real time by reading provider
-  rate-limit headers (`anthropic-ratelimit-*`, `x-ratelimit-*`)
-- **shares** a single project brain across all of them
-- **fails over** to a fresh agent when the active one approaches its limit,
-  with a critic-summarised handoff brief
-- **runs** an internal cheap-worker / expensive-critic loop when you want supervised autonomous edits
-- **boots** from a single `handoff init` wizard that starts the background services, installs hooks, and writes config
+- watches Claude Code, Codex, Copilot, Cursor, and Antigravity
+- reads provider rate-limit headers from the local proxy
+- keeps a shared project memory on disk
+- hands work to the next agent before the active one stalls
+- runs a worker/critic review loop for supervised implementation work
 
-**handoff proxy + failover** require no API key — they observe rate-limit headers and redirect your agent processes.
+## `handoff init`
 
-**handoff critic** uses your local agent CLIs (`claude`, `codex`, `gh copilot`) for both worker and critic roles. No separate API key is required.
-
-## Status
-
-v0.4.1-alpha — alpha-bugfix release.
-56 Rust tests, all passing.
-
-What's new since v0.4.0-alpha:
-- **macOS PID attribution fix.** `lsof -i:<port>` returns both ends of
-  a localhost MITM connection; we now match by **local** endpoint so
-  the agent's PID gets recorded, not the proxy's own.
-- **`handoff spawn` headless behaviour.** Positional args after `--`
-  now invoke headless mode (`claude -p "summarize"`); no args = TUI.
-- **`handoff doctor`.** Preflight check for daemon/proxy/CA/agents.
-
-## Quick start
+The normal setup flow is a single command:
 
 ```bash
 brew install handsoff
-
 cd your-project
 handoff init
 ```
 
-That setup wizard:
+`handoff init` is the setup wizard. It:
 
-- detects Claude Code, Codex, Copilot, and Cursor / Antigravity
-- asks the failover threshold and preferred chain
-- asks worker and critic model choices
-- writes unified memory + config
-- installs shell, Claude, and Codex hooks
-- starts the daemon and observer in the background
-- keeps running silently while you use `claude`, `codex`, and `gh copilot`
+1. starts the daemon in the background
+2. starts the local proxy
+3. detects installed agents
+4. asks for the failover threshold
+5. asks for the preferred agent chain
+6. asks for worker and critic choices
+7. writes unified memory and config
+8. installs shell, Claude, and Codex hooks
+9. keeps running silently after setup
 
-After setup, the normal workflow is just:
+After that, the normal workflow is just:
 
 ```bash
 claude
@@ -58,81 +40,38 @@ codex
 gh copilot
 ```
 
-## Architecture
+`handoff` watches and intervenes only when policy says it should.
 
-```
-   shell  ──▶  handoff (CLI)  ──HTTP──▶  handoffd (axum)
-                                            │
-        ┌───────────────────────────────────┼───────────────────────┐
-        │                                   │                       │
-   AgentRegistry                       ContextEngine            FailoverEngine
-   (sysinfo + proxy-classified)        (.handoff/ brain)         (mpsc channel)
-        │                                   │                       │
-        └────────────── SQLite (~/.handoff/state.db) ────────────────┘
-                                ▲
-                                │ POST /ingest (headers + PID + sample)
-                                │
-                       handoff-proxy (hudsucker MITM)
-                                ▲
-                                │ HTTPS_PROXY=127.0.0.1:8080
-        ┌───────────────────────┼─────────────────────────┐
-     claude                  codex                  copilot         cursor/antigravity
-                                                                    (companion extension)
+## Runtime Model
+
+```text
+user works normally
+    ↓
+handoff watches usage
+    ↓
+threshold reached
+    ↓
+snapshot current state
+    ↓
+critic reviews
+    ↓
+next agent receives context
+    ↓
+work continues
 ```
 
-## Privacy
-
-- The MITM proxy logs response **headers only** — never request or response bodies.
-- Rate-limit headers (`anthropic-ratelimit-*`, `x-ratelimit-*`) are stored in `~/.handoff/state.db`.
-- Snapshots written to `<project>/.handoff/scratch/` are local-only; nothing is sent to any server.
-- To delete all state: `rm -rf ~/.handoff && rm -rf <project>/.handoff`
-
-## Workspace layout
-
-```
-rust/
-  Cargo.toml                  workspace, edition 2021, rustc 1.80+
-  crates/
-    cli/        clap front-end
-    daemon/     axum HTTP + ingest + RPC + failover engine
-    proxy/      hudsucker MITM + on-disk CA + PID-from-socket lookup
-    context/    brain.md + intelligent Snapshot from git/shell/tests
-    critic/     local CLI worker/critic/summariser + watch loop
-    policy/     declarative thresholds + chain
-    adapters/   per-agent detection + rate-limit header parsing
-    storage/    rusqlite schema + queries
-    common/     shared types + paths
-extension/      VSCode/Cursor companion (TypeScript) — TLS-pinning fallback
-```
-
-## Per-agent support
+## Per-Agent Support
 
 | Agent | Detect | Context inject | Usage read | Headless spawn |
 |---|---|---|---|---|
-| **Claude Code** | `claude` binary; proxy: `api.anthropic.com` | `CLAUDE.md` | `anthropic-ratelimit-*` | `claude -p "<prompt>"` |
-| **Codex CLI** | `codex` binary; proxy: `api.openai.com` | `AGENTS.md` | `x-ratelimit-*` | `codex exec "<prompt>"` |
-| **Copilot CLI** | `gh copilot`; proxy: `api.githubcopilot.com` | `.github/copilot-instructions.md` | request counts only | `gh copilot suggest "<prompt>"` |
-| **Cursor / Antigravity** | Electron binary | `.cursorrules` | best-effort (TLS-pinned; companion extension) | not supported |
+| Claude Code | `claude` binary; proxy: `api.anthropic.com` | `CLAUDE.md` | `anthropic-ratelimit-*` | `claude -p "<prompt>"` |
+| Codex CLI | `codex` binary; proxy: `api.openai.com` | `AGENTS.md` | `x-ratelimit-*` | `codex exec "<prompt>"` |
+| Copilot CLI | `gh copilot`; proxy: `api.githubcopilot.com` | `.github/copilot-instructions.md` | request counts only | `gh copilot suggest "<prompt>"` |
+| Cursor / Antigravity | Electron binary | `.cursorrules` | best-effort via companion extension | not supported |
 
-## CLI surface
+## Configuration
 
-```
-handoff init [path]                         interactive setup wizard
-handoff sync [path]                         brain.md → derived/*
-handoff agents                              live agent table
-handoff discover                            scan running processes
-handoff snapshot [--reason] [--json]        generate intelligent Snapshot
-handoff spawn <kind> [--no-proxy] -- ...    spawn agent w/ proxy env
-handoff attach <pid> --kind=<kind>          register existing process
-handoff handoff <to-kind> [--from N]        manual failover
-handoff brain {cat|edit|append}             brain.md helpers
-handoff critic run "<task>"                 one-shot worker+critic
-handoff critic watch "<task>"               re-run on file changes
-handoff daemon {run|start|stop|status}      admin: daemon lifecycle
-handoff proxy {start|stop|status}           admin: proxy lifecycle
-```
-
-## Per-project config (`.handoff/config.toml`)
+`handoff init` writes `.handoff/config.toml` with the project policy.
 
 ```toml
 [failover]
@@ -152,16 +91,32 @@ mode = "unified"
 auto_snapshot = true
 ```
 
-## Risks / open issues
+## Command Surface
 
-1. **CA install** is a real onboarding wart. `handoff proxy start` prints
-   the per-OS install command on first run.
-2. **Cursor / Antigravity** pin TLS; the companion extension under
-   `extension/` is the activity-signal fallback (no token budget metering).
-3. **Copilot** is opaque (no per-request budget header); we count requests
-   and 429s only.
+```text
+handoff init [path]                         interactive setup wizard
+handoff sync [path]                         brain.md → derived files
+handoff agents                              live agent table
+handoff discover                            scan running processes
+handoff snapshot [--reason] [--json]        generate a project snapshot
+handoff spawn <kind> [--no-proxy] -- ...    spawn an agent with proxy env
+handoff attach <pid> --kind=<kind>          register an existing process
+handoff handoff <to-kind> [--from N]        manual failover
+handoff brain {cat|edit|append}             brain.md helpers
+handoff critic run "<task>"                 one-shot worker + critic
+handoff critic watch "<task>"               rerun on file changes
+handoff daemon {run|start|stop|status}      admin: daemon lifecycle
+handoff proxy {start|stop|status}           admin: proxy lifecycle
+```
 
-## Build / test
+## Safety Boundaries
+
+- The proxy logs response headers only, never request or response bodies.
+- Snapshots stay local under `<project>/.handoff/scratch/`.
+- Rate-limit samples are stored in `~/.handoff/state.db`.
+- To remove local state: `rm -rf ~/.handoff && rm -rf <project>/.handoff`
+
+## Build And Test
 
 ```bash
 cd rust
@@ -169,4 +124,5 @@ cargo build --workspace --release
 cargo test --workspace
 ```
 
-Linux + macOS only. Windows via WSL.
+Linux and macOS are supported. Windows is not a first-class target.
+
