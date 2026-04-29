@@ -12,6 +12,7 @@ Copilot CLI, Cursor / Antigravity). Single-binary Rust.
 - **fails over** to a fresh agent when the active one approaches its limit,
   with a critic-summarised handoff brief
 - **runs** an internal cheap-worker / expensive-critic loop when you want supervised autonomous edits
+- **boots** from a single `handoff init` wizard that starts the background services, installs hooks, and writes config
 
 **handoff proxy + failover** require no API key — they observe rate-limit headers and redirect your agent processes.
 
@@ -33,21 +34,28 @@ What's new since v0.4.0-alpha:
 ## Quick start
 
 ```bash
-cargo install --path rust/crates/cli           # builds the `handoff` binary
+brew install handsoff
 
-handoff init                                    # scaffold .handoff/
-handoff daemon start                            # background daemon
-handoff proxy start                             # local MITM proxy
-                                                # (CA install prompt on first run)
-handoff spawn claude -- "summarize this repo"   # headless: claude -p "..."
-handoff spawn claude                            # interactive TUI (no args)
-handoff agents                                  # live table of agents + tokens
+cd your-project
+handoff init
+```
 
-handoff critic run "add a /version endpoint"    # local-CLI worker + critic
-handoff critic run "X" --worker codex --critic claude
-handoff critic watch "polish the docs"          # re-runs on file changes
+That setup wizard:
 
-handoff doctor                                  # preflight check
+- detects Claude Code, Codex, Copilot, and Cursor / Antigravity
+- asks the failover threshold and preferred chain
+- asks worker and critic model choices
+- writes unified memory + config
+- installs shell, Claude, and Codex hooks
+- starts the daemon and observer in the background
+- keeps running silently while you use `claude`, `codex`, and `gh copilot`
+
+After setup, the normal workflow is just:
+
+```bash
+claude
+codex
+gh copilot
 ```
 
 ## Architecture
@@ -109,7 +117,7 @@ extension/      VSCode/Cursor companion (TypeScript) — TLS-pinning fallback
 ## CLI surface
 
 ```
-handoff init [path]                         scaffold .handoff/
+handoff init [path]                         interactive setup wizard
 handoff sync [path]                         brain.md → derived/*
 handoff agents                              live agent table
 handoff discover                            scan running processes
@@ -120,27 +128,28 @@ handoff handoff <to-kind> [--from N]        manual failover
 handoff brain {cat|edit|append}             brain.md helpers
 handoff critic run "<task>"                 one-shot worker+critic
 handoff critic watch "<task>"               re-run on file changes
-handoff daemon {run|start|stop|status}      daemon lifecycle
-handoff proxy {start|stop|status}           proxy lifecycle
+handoff daemon {run|start|stop|status}      admin: daemon lifecycle
+handoff proxy {start|stop|status}           admin: proxy lifecycle
 ```
 
 ## Per-project config (`.handoff/config.toml`)
 
 ```toml
 [failover]
-tokens_remaining_pct = 10.0       # trigger when % drops below
-tokens_remaining_abs = 1000       # OR absolute tokens
-requests_remaining = 5            # OR remaining requests
+threshold_percent = 15
 chain = ["claude", "codex", "copilot"]
-auto_spawn = true
-summarize = true                  # use critic agent for handoff brief
+auto_switch = true
+summarize = true
 
-[critic]
-worker_agent     = "claude"        # local CLI: claude | codex | copilot
-critic_agent     = "claude"
-summarizer_agent = "claude"
-# v0.4.0-alpha names (worker_model / critic_model / summarizer_model)
-# are still accepted as aliases.
+[review]
+worker_agent = "claude-haiku"
+lead_agent = "claude-opus"
+passing_score = 8
+max_rounds = 3
+
+[memory]
+mode = "unified"
+auto_snapshot = true
 ```
 
 ## Risks / open issues
