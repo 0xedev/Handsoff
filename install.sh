@@ -4,6 +4,12 @@ set -e
 
 REPO="0xedev/handoff"
 BIN_DIR="${HANDOFF_BIN_DIR:-/usr/local/bin}"
+TMP_DIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 detect_target() {
     OS="$(uname -s)"
@@ -38,11 +44,11 @@ verify_sha256() {
 }
 
 ARTIFACT="$(detect_target)"
-TAG="$(curl -sSfL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' | cut -d'"' -f4)"
+TAG="$(curl -sSfL "https://api.github.com/repos/${REPO}/tags?per_page=1" \
+    | grep '"name"' | head -n 1 | cut -d'"' -f4)"
 
 if [ -z "$TAG" ]; then
-    echo "Could not determine latest release tag" >&2
+    echo "Could not determine latest tag" >&2
     exit 1
 fi
 
@@ -51,15 +57,30 @@ URL="${BASE_URL}/${ARTIFACT}"
 CHECKSUM_URL="${BASE_URL}/${ARTIFACT}.sha256"
 
 echo "Downloading handoff ${TAG} for ${ARTIFACT}..."
-curl -sSfL "$URL" -o /tmp/handoff-install
-curl -sSfL "$CHECKSUM_URL" -o /tmp/handoff-install.sha256 2>/dev/null && \
-    EXPECTED="$(cat /tmp/handoff-install.sha256 | awk '{print $1}')" && \
-    verify_sha256 /tmp/handoff-install "$EXPECTED" || \
-    echo "  WARNING: checksum file not found for this release — skipping verification" >&2
+if curl -fsSfL "$URL" -o "$TMP_DIR/handoff-install"; then
+    if curl -fsSfL "$CHECKSUM_URL" -o "$TMP_DIR/handoff-install.sha256" 2>/dev/null; then
+        EXPECTED="$(awk '{print $1}' "$TMP_DIR/handoff-install.sha256")"
+        verify_sha256 "$TMP_DIR/handoff-install" "$EXPECTED"
+    else
+        echo "  WARNING: checksum file not found for this release — skipping verification" >&2
+    fi
+    chmod +x "$TMP_DIR/handoff-install"
+    sudo mv "$TMP_DIR/handoff-install" "${BIN_DIR}/handoff"
+    echo "Installed handoff release ${TAG} to ${BIN_DIR}/handoff"
+else
+    echo "Release binary not available yet for ${TAG}; building from source..." >&2
+    SRC_URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+    curl -fsSL "$SRC_URL" -o "$TMP_DIR/handoff-src.tar.gz"
+    tar -xzf "$TMP_DIR/handoff-src.tar.gz" -C "$TMP_DIR"
+    SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d | grep -E '/[Hh]andsoff-' | head -n 1)"
+    if [ -z "$SRC_DIR" ]; then
+        echo "Could not unpack source archive" >&2
+        exit 1
+    fi
+    cargo build --locked --release --bin handoff --manifest-path "$SRC_DIR/rust/crates/cli/Cargo.toml"
+    chmod +x "$SRC_DIR/rust/target/release/handoff"
+    sudo mv "$SRC_DIR/rust/target/release/handoff" "${BIN_DIR}/handoff"
+    echo "Installed handoff from source tag ${TAG} to ${BIN_DIR}/handoff"
+fi
 
-chmod +x /tmp/handoff-install
-sudo mv /tmp/handoff-install "${BIN_DIR}/handoff"
-rm -f /tmp/handoff-install.sha256
-
-echo "Installed handoff to ${BIN_DIR}/handoff"
 echo "Run: handoff init"

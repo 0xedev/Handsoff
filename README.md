@@ -33,6 +33,8 @@ cd your-project
 handoff init
 ```
 
+The installer prefers GitHub release binaries and falls back to a source build if a release asset is not available yet.
+
 `handoff init` is the setup wizard. It:
 
 1. starts the daemon in the background
