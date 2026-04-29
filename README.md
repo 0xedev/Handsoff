@@ -23,6 +23,7 @@ It runs quietly in the background and:
 The normal setup flow is a single command:
 
 ```bash
+brew tap 0xedev/handoff https://github.com/0xedev/Handsoff
 brew install handsoff
 cd your-project
 handoff init

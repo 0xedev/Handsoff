@@ -62,4 +62,4 @@ sudo mv /tmp/handoff-install "${BIN_DIR}/handoff"
 rm -f /tmp/handoff-install.sha256
 
 echo "Installed handoff to ${BIN_DIR}/handoff"
-echo "Run: handoff setup"
+echo "Run: handoff init"
