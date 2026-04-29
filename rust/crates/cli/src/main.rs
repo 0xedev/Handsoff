@@ -1,5 +1,6 @@
 //! `handoff` CLI binary.
 
+use std::io::IsTerminal;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use crossterm::style::Stylize;
 use handoff_adapters::{all as all_adapters, snapshot_procs};
 use handoff_common::{daemon_pidfile, db_path, home_dir, proxy_pidfile, AgentKind};
 use handoff_context::{init_project, ContextEngine};
@@ -475,6 +477,7 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
     let project_id = db.upsert_project(&root.display().to_string())?;
     let detected = detect_installed_agents();
 
+    print_init_banner();
     println!("Detected agents:");
     for (label, ok) in &detected {
         println!("{} {label}", if *ok { "✓" } else { "⚠" });
@@ -537,6 +540,32 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
     println!("project_id={project_id}");
     println!("setup root: {}", handoff_dir.display());
     Ok(())
+}
+
+fn print_init_banner() {
+    let stdout_is_tty = io::stdout().is_terminal();
+    let lines = [
+        " _   _                 __            __             ",
+        "| | | | ___  _ __ ___ / _| ___  ___ / _| ___  _ __  ",
+        "| |_| |/ _ \\| '__/ _ \\ |_ / _ \\/ __| |_ / _ \\| '__| ",
+        "|  _  | (_) | | |  __/  _|  __/ (__|  _| (_) | |    ",
+        "|_| |_|\\___/|_|  \\___|_|  \\___|\\___|_|  \\___/|_|    ",
+    ];
+
+    println!();
+    for line in lines {
+        if stdout_is_tty {
+            println!("{}", line.cyan().bold());
+        } else {
+            println!("{line}");
+        }
+    }
+    if stdout_is_tty {
+        println!("{}", "local control plane for AI agents".dark_grey());
+    } else {
+        println!("local control plane for AI agents");
+    }
+    println!();
 }
 
 fn detect_installed_agents() -> Vec<(String, bool)> {
