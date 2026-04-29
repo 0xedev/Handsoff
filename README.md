@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="assets/handoff-readme-logo.png" alt="handoff logo" width="160" />
+</p>
+
+<p align="center">
+  <img src="assets/handoff-readme-banner.png" alt="handoff banner" width="100%" />
+</p>
+
 # handoff
 
 `handoff` is a local control plane for AI coding agents.
@@ -125,4 +133,3 @@ cargo test --workspace
 ```
 
 Linux and macOS are supported. Windows is not a first-class target.
-
