@@ -53,6 +53,11 @@ pub fn recent_commands(project_root: &Path, n: usize) -> Vec<String> {
         return last_n(lines, n);
     }
 
+    let global_cmdlog = handoff_common::home_dir().join("cmdlog.txt");
+    if let Some(lines) = read_file_lines(&global_cmdlog) {
+        return last_n(lines, n);
+    }
+
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return Vec::new(),

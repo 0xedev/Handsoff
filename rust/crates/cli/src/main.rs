@@ -1,5 +1,6 @@
 //! `handoff` CLI binary.
 
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -269,7 +270,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Init { path } => cmd_init(path),
+        Cmd::Init { path } => cmd_init(path).await,
         Cmd::Sync { path } => cmd_sync(path),
         Cmd::Agents { project_id, once } => cmd_agents(project_id, once).await,
         Cmd::Discover => cmd_discover(),
@@ -354,7 +355,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Setup { project } => handoff_cli::setup::run_setup(project.as_deref()).await,
+        Cmd::Setup { project } => cmd_init(project.map(PathBuf::from).unwrap_or_default()).await,
         Cmd::Teardown => handoff_cli::setup::run_teardown().await,
         Cmd::InitHook => {
             let script = r#"
@@ -462,14 +463,161 @@ async fn cmd_doctor() -> Result<()> {
 
 // --- core ---------------------------------------------------------------
 
-fn cmd_init(path: PathBuf) -> Result<()> {
-    let root = path.canonicalize().context("resolving project path")?;
-    let h = init_project(&root)?;
+async fn cmd_init(path: PathBuf) -> Result<()> {
+    let root = if path.as_os_str().is_empty() || path == PathBuf::from(".") {
+        std::env::current_dir()?.canonicalize()?
+    } else {
+        path.canonicalize().context("resolving project path")?
+    };
+
+    let handoff_dir = init_project(&root)?;
     let db = Database::open(&db_path())?;
-    let pid = db.upsert_project(&root.display().to_string())?;
-    println!("initialized {} (project_id={pid})", h.display());
-    println!("next: edit .handoff/brain.md and .handoff/intent.md, then run `handoff sync`");
+    let project_id = db.upsert_project(&root.display().to_string())?;
+    let detected = detect_installed_agents();
+
+    println!("Detected agents:");
+    for (label, ok) in &detected {
+        println!("{} {label}", if *ok { "✓" } else { "⚠" });
+    }
+
+    let threshold = prompt_u32("Switch agents when usage reaches", 15)?;
+    let chain_default = detected_chain(&detected);
+    let chain_input = prompt_text("Failover chain", &chain_default.join(" -> "))?;
+    let chain = parse_chain(&chain_input, &chain_default);
+    let worker = prompt_text("Worker agent", "claude")?;
+    let critic = prompt_text("Lead critic", "claude")?;
+    let passing_score = prompt_u32("Require critic score before completion", 8)?;
+    let start_background = prompt_yes_no("Start Handsoff in background", true)?;
+
+    let config_path = handoff_cli::setup::write_init_config(
+        &root,
+        threshold,
+        &chain,
+        &worker,
+        &critic,
+        passing_score,
+    )?;
+    println!("wrote {}", config_path.display());
+
+    let written = ContextEngine::new(&root).sync()?;
+    if !written.is_empty() {
+        println!("synced {} context files", written.len());
+    }
+
+    let shell_hook = handoff_cli::hook::install_shell()?;
+    println!("shell hook: {}", shell_hook.display());
+
+    if detected
+        .iter()
+        .any(|(label, ok)| *ok && label == "Claude Code")
+    {
+        let settings = dirs::home_dir().unwrap().join(".claude/settings.json");
+        let daemon_url = std::env::var("HANDOFF_DAEMON_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+        let _ = handoff_cli::hook::install_claude(&daemon_url, &settings);
+    }
+
+    if start_background {
+        cmd_daemon_start(default_daemon_addr())?;
+        cmd_proxy_start(default_proxy_addr())?;
+    }
+
+    if start_background {
+        wait_for_daemon_ready().await?;
+        let _ = rpc_register_project(&root).await?;
+        println!("✓ daemon running");
+        println!("✓ observer running");
+        println!("✓ unified memory active");
+        println!("✓ hooks installed");
+        println!("✓ watching agents");
+    } else {
+        println!("setup complete, start background services with `handoff daemon start` and `handoff proxy start`");
+    }
+
+    println!("project_id={project_id}");
+    println!("setup root: {}", handoff_dir.display());
     Ok(())
+}
+
+fn detect_installed_agents() -> Vec<(String, bool)> {
+    let candidates = [
+        ("Claude Code", "claude"),
+        ("Codex", "codex"),
+        ("GitHub Copilot", "gh"),
+        ("Cursor / Antigravity", "cursor"),
+    ];
+    candidates
+        .into_iter()
+        .map(|(label, bin)| (label.to_string(), which::which(bin).is_ok()))
+        .collect()
+}
+
+fn detected_chain(detected: &[(String, bool)]) -> Vec<String> {
+    let mut chain = Vec::new();
+    for (label, ok) in detected {
+        if !ok {
+            continue;
+        }
+        match label.as_str() {
+            "Claude Code" => chain.push("claude".into()),
+            "Codex" => chain.push("codex".into()),
+            "GitHub Copilot" => chain.push("copilot".into()),
+            "Cursor / Antigravity" => chain.push("cursor".into()),
+            _ => {}
+        }
+    }
+    if chain.is_empty() {
+        vec!["claude".into(), "codex".into(), "copilot".into()]
+    } else {
+        chain
+    }
+}
+
+fn prompt_text(label: &str, default: &str) -> Result<String> {
+    print!("{label}? [{default}] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf)?;
+    let trimmed = buf.trim();
+    Ok(if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    })
+}
+
+fn prompt_u32(label: &str, default: u32) -> Result<u32> {
+    let input = prompt_text(label, &default.to_string())?;
+    Ok(input.parse().unwrap_or(default))
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
+    let default_label = if default { "Y/n" } else { "y/N" };
+    print!("{label}? [{default_label}] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf)?;
+    let trimmed = buf.trim().to_ascii_lowercase();
+    Ok(match trimmed.as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        _ => default,
+    })
+}
+
+fn parse_chain(input: &str, default: &[String]) -> Vec<String> {
+    let cleaned: Vec<String> = input
+        .split(&['→', ',', '-', '>'][..])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| AgentKind::parse(s).map(|k| k.as_str().to_string()))
+        .collect();
+    if cleaned.is_empty() {
+        default.to_vec()
+    } else {
+        cleaned
+    }
 }
 
 fn cmd_sync(path: PathBuf) -> Result<()> {
@@ -589,14 +737,15 @@ async fn cmd_spawn(
     }
     let mut child = cmd.spawn()?;
     let pid = child.id();
-    rpc_call(
-        "register_project",
-        serde_json::json!({"root": project_root.display().to_string()}),
-    )
-    .await?;
+    let project_id = rpc_register_project(&project_root).await?;
     let res = rpc_call(
         "register_agent",
-        serde_json::json!({"kind": kind, "pid": pid, "spawned_by": "handoff"}),
+        serde_json::json!({
+            "project_id": project_id,
+            "kind": kind,
+            "pid": pid,
+            "spawned_by": "handoff",
+        }),
     )
     .await?;
     let aid = res
@@ -663,14 +812,14 @@ fn build_spawn_argv(
 
 async fn cmd_attach(pid: i64, kind: String, project: PathBuf) -> Result<()> {
     let project_root = project.canonicalize()?;
-    rpc_call(
-        "register_project",
-        serde_json::json!({"root": project_root.display().to_string()}),
-    )
-    .await?;
+    let project_id = rpc_register_project(&project_root).await?;
     let res = rpc_call(
         "attach_agent",
-        serde_json::json!({"kind": kind, "pid": pid}),
+        serde_json::json!({
+            "project_id": project_id,
+            "kind": kind,
+            "pid": pid,
+        }),
     )
     .await?;
     let aid = res.get("agent_id").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -686,14 +835,11 @@ async fn cmd_handoff(
     project: PathBuf,
 ) -> Result<()> {
     let project_root = project.canonicalize()?;
-    rpc_call(
-        "register_project",
-        serde_json::json!({"root": project_root.display().to_string()}),
-    )
-    .await?;
+    let project_id = rpc_register_project(&project_root).await?;
     let res = rpc_call(
         "handoff",
         serde_json::json!({
+            "project_id": project_id,
             "to_kind": to_kind,
             "from_agent_id": from_agent,
             "reason": reason,
@@ -787,6 +933,7 @@ async fn cmd_critic_run(
     no_proxy: bool,
 ) -> Result<()> {
     let root = project.canonicalize()?;
+    let project_id = rpc_register_project(&root).await.ok();
     let policy = handoff_policy::load(&root).unwrap_or_default();
     let mut runner = handoff_critic::CriticRunner::new(&root)?
         .with_agents(worker.clone(), critic.clone())
@@ -802,6 +949,7 @@ async fn cmd_critic_run(
     let _ = rpc_call(
         "record_critic_run",
         serde_json::json!({
+            "project_id": project_id,
             "worker_agent": res.worker_agent,
             "critic_agent": res.critic_agent,
             "verdict": res.verdict,
@@ -822,6 +970,7 @@ async fn cmd_critic_watch(
     no_proxy: bool,
 ) -> Result<()> {
     let root = project.canonicalize()?;
+    let project_id = rpc_register_project(&root).await.ok();
     let runner = handoff_critic::CriticRunner::new(&root)?
         .with_agents(worker.clone(), critic.clone())
         .with_proxy(if no_proxy { None } else { Some(proxy_url()) });
@@ -841,6 +990,7 @@ async fn cmd_critic_watch(
                     let _ = rpc_call(
                         "record_critic_run",
                         serde_json::json!({
+                            "project_id": project_id,
                             "worker_agent": res.worker_agent,
                             "critic_agent": res.critic_agent,
                             "verdict": res.verdict,
@@ -1017,6 +1167,20 @@ fn proxy_url() -> String {
     std::env::var("HANDOFF_PROXY_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
 }
 
+fn default_daemon_addr() -> SocketAddr {
+    std::env::var("HANDOFF_DAEMON_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| "127.0.0.1:7879".parse().expect("valid default daemon addr"))
+}
+
+fn default_proxy_addr() -> SocketAddr {
+    std::env::var("HANDOFF_PROXY_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default proxy addr"))
+}
+
 fn pid_alive(pid: i32) -> bool {
     #[cfg(unix)]
     unsafe {
@@ -1075,6 +1239,42 @@ async fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json:
         return Err(anyhow!("rpc {method}: {err}"));
     }
     Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
+}
+
+async fn rpc_register_project(project_root: &Path) -> Result<i64> {
+    let res = rpc_call(
+        "register_project",
+        serde_json::json!({"root": project_root.display().to_string()}),
+    )
+    .await?;
+    res.get("project_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow!("register_project returned no project_id"))
+}
+
+async fn wait_for_daemon_ready() -> Result<()> {
+    let health = daemon_health_url();
+    let client = reqwest::Client::new();
+    for _ in 0..40 {
+        if matches!(
+            client.get(&health).timeout(Duration::from_secs(1)).send().await,
+            Ok(resp) if resp.status().is_success()
+        ) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(anyhow!("daemon did not become ready at {health}"))
+}
+
+fn daemon_health_url() -> String {
+    let rpc = std::env::var("HANDOFF_DAEMON_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:7879/rpc".to_string());
+    if let Some(base) = rpc.strip_suffix("/rpc") {
+        format!("{base}/health")
+    } else {
+        format!("{rpc}/health")
+    }
 }
 
 #[allow(dead_code)]

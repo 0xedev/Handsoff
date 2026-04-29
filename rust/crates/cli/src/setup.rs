@@ -5,7 +5,7 @@
 //! `run_teardown()` revokes the CA and cleans up system trust entries.
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub fn ca_install_command(cert_path: &Path) -> Option<Vec<String>> {
@@ -77,6 +77,51 @@ pub async fn run_setup(path: Option<&str>) -> Result<()> {
     println!("  handoff spawn claude");
 
     Ok(())
+}
+
+/// Write the initial project config in the newer handsoff shape.
+pub fn write_init_config(
+    root: &Path,
+    threshold_percent: u32,
+    chain: &[String],
+    worker_agent: &str,
+    critic_agent: &str,
+    passing_score: u32,
+) -> Result<PathBuf> {
+    let config_path = handoff_common::project_dir(root).join("config.toml");
+    let chain_str = chain
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!(
+        r#"[failover]
+threshold_percent = {threshold}
+chain = [{chain}]
+auto_switch = true
+summarize = true
+
+[review]
+worker_agent = "{worker}"
+lead_agent = "{critic}"
+passing_score = {score}
+max_rounds = 3
+
+[memory]
+mode = "unified"
+auto_snapshot = true
+"#,
+        threshold = threshold_percent,
+        chain = chain_str,
+        worker = worker_agent,
+        critic = critic_agent,
+        score = passing_score,
+    );
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&config_path, body)?;
+    Ok(config_path)
 }
 
 /// Remove the handoff CA from the system trust store and clean up state.

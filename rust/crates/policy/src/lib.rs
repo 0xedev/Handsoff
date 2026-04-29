@@ -15,6 +15,8 @@ pub struct Policy {
     pub failover: FailoverPolicy,
     #[serde(default)]
     pub critic: CriticPolicy,
+    #[serde(default)]
+    pub memory: MemoryPolicy,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -26,7 +28,7 @@ pub struct RateSampleInput {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FailoverPolicy {
-    #[serde(default = "default_pct")]
+    #[serde(default = "default_pct", alias = "threshold_percent")]
     pub tokens_remaining_pct: f64,
     #[serde(default)]
     pub tokens_remaining_abs: Option<i64>,
@@ -34,7 +36,7 @@ pub struct FailoverPolicy {
     pub requests_remaining: i64,
     #[serde(default = "default_chain")]
     pub chain: Vec<String>,
-    #[serde(default = "yes")]
+    #[serde(default = "yes", alias = "auto_switch")]
     pub auto_spawn: bool,
     #[serde(default)]
     pub summarize: bool,
@@ -51,13 +53,27 @@ pub struct CriticPolicy {
     #[serde(default = "default_worker", alias = "worker_model")]
     pub worker_agent: String,
     /// Local agent that drives the critic role.
-    #[serde(default = "default_critic", alias = "critic_model")]
+    #[serde(
+        default = "default_critic",
+        alias = "critic_model",
+        alias = "lead_agent"
+    )]
     pub critic_agent: String,
     /// Local agent used for failover-snapshot summarisation.
     #[serde(default = "default_critic", alias = "summarizer_model")]
     pub summarizer_agent: String,
+    #[serde(default = "default_score", alias = "passing_score")]
+    pub passing_score: u32,
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryPolicy {
+    #[serde(default = "default_memory_mode")]
+    pub mode: String,
+    #[serde(default = "yes")]
+    pub auto_snapshot: bool,
 }
 
 fn default_max_rounds() -> u32 {
@@ -82,6 +98,12 @@ fn default_worker() -> String {
 fn default_critic() -> String {
     "claude".into()
 }
+fn default_score() -> u32 {
+    8
+}
+fn default_memory_mode() -> String {
+    "unified".into()
+}
 
 impl Default for FailoverPolicy {
     fn default() -> Self {
@@ -104,7 +126,17 @@ impl Default for CriticPolicy {
             worker_agent: default_worker(),
             critic_agent: default_critic(),
             summarizer_agent: default_critic(),
+            passing_score: default_score(),
             max_rounds: default_max_rounds(),
+        }
+    }
+}
+
+impl Default for MemoryPolicy {
+    fn default() -> Self {
+        Self {
+            mode: default_memory_mode(),
+            auto_snapshot: true,
         }
     }
 }

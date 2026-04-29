@@ -6,7 +6,7 @@
 //! agent's settings.json to call it.
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The hook script reads the JSON Claude Code sends on stdin, extracts the
 /// tool name, uses $PPID as the agent PID (the hook is a child of claude),
@@ -27,6 +27,43 @@ curl -s -X POST {url}/hook \
 "#,
         url = daemon_url
     )
+}
+
+fn shell_hook_script() -> String {
+    r#"#!/usr/bin/env sh
+# handoff shell hook
+mkdir -p "$HOME/.handoff"
+if [ -n "${ZSH_VERSION-}" ]; then
+  if command -v add-zsh-hook >/dev/null 2>&1; then
+    autoload -Uz add-zsh-hook >/dev/null 2>&1 || true
+    handoff_log_command() {
+      printf '%s\n' "$1" >> "$HOME/.handoff/cmdlog.txt"
+    }
+    add-zsh-hook preexec handoff_log_command
+  fi
+elif [ -n "${BASH_VERSION-}" ]; then
+  trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/.handoff/cmdlog.txt"' DEBUG
+fi
+"#
+    .to_string()
+}
+
+fn ensure_rc_block(rc_path: &Path, block: &str) -> Result<()> {
+    let existing = std::fs::read_to_string(rc_path).unwrap_or_default();
+    if existing.contains(block) {
+        return Ok(());
+    }
+    if let Some(parent) = rc_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut body = existing;
+    if !body.ends_with('\n') && !body.is_empty() {
+        body.push('\n');
+    }
+    body.push_str(block);
+    body.push('\n');
+    std::fs::write(rc_path, body)?;
+    Ok(())
 }
 
 /// Install the PreToolUse hook for Claude Code.
@@ -62,6 +99,35 @@ pub fn install_claude(daemon_url: &str, settings_path: &Path) -> Result<()> {
     println!("Hook script: {}", script_path.display());
     println!("Hook registered in {}", settings_path.display());
     Ok(())
+}
+
+/// Install the shell command-log hook used by the snapshot engine.
+pub fn install_shell() -> Result<PathBuf> {
+    let hooks_dir = handoff_common::home_dir().join("hooks");
+    std::fs::create_dir_all(&hooks_dir)?;
+    let script_path = hooks_dir.join("shell.sh");
+    std::fs::write(&script_path, shell_hook_script())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    let block = format!(
+        r#"# handoff begin
+if [ -f "{script}" ]; then
+  . "{script}"
+fi
+# handoff end"#,
+        script = script_path.display()
+    );
+    let zshrc = dirs::home_dir().unwrap().join(".zshrc");
+    let bashrc = dirs::home_dir().unwrap().join(".bashrc");
+    let _ = ensure_rc_block(&zshrc, &block);
+    let _ = ensure_rc_block(&bashrc, &block);
+
+    Ok(script_path)
 }
 
 /// Remove the PreToolUse hook from Claude Code settings.
