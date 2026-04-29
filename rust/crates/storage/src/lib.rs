@@ -120,7 +120,6 @@ pub struct RateSampleRow {
     pub tokens_reset_at: Option<i64>,
 }
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HandoffRow {
     pub id: i64,
@@ -147,15 +146,22 @@ pub struct DailyStat {
     pub handoff_count: i64,
 }
 
-
+pub struct CriticRunInsert<'a> {
+    pub project_id: i64,
+    pub worker_agent: &'a str,
+    pub critic_agent: &'a str,
+    pub worker_tokens: Option<u64>,
+    pub critic_tokens: Option<u64>,
+    pub verdict: &'a str,
+    pub notes: Option<&'a str>,
+}
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
@@ -197,7 +203,12 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn insert_activity(&self, agent_id: i64, tool_name: &str, tool_input: Option<&str>) -> Result<()> {
+    pub fn insert_activity(
+        &self,
+        agent_id: i64,
+        tool_name: &str,
+        tool_input: Option<&str>,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO agent_activity (agent_id, ts, tool_name, tool_input) VALUES (?1, ?2, ?3, ?4)",
@@ -208,10 +219,7 @@ impl Database {
 
     pub fn update_agent_pid(&self, id: i64, pid: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE agents SET pid = ?1 WHERE id = ?2",
-            params![pid, id],
-        )?;
+        conn.execute("UPDATE agents SET pid = ?1 WHERE id = ?2", params![pid, id])?;
         Ok(())
     }
 
@@ -411,7 +419,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, from_agent_id, to_agent_id, reason, ts, context_snapshot_path \
-             FROM handoffs WHERE id = ?"
+             FROM handoffs WHERE id = ?",
         )?;
         let row = stmt.query_row([id], |row| {
             Ok(HandoffRow {
@@ -428,35 +436,67 @@ impl Database {
     pub fn get_agent(&self, id: i64) -> Result<AgentSummary> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, kind, pid, status, spawned_by, started_at, tokens_remaining, requests_remaining, \
-             tokens_reset_at, last_sample_ts, total_requests, rate_limited_count, last_429_at \
-             FROM agents WHERE id = ?"
+            "SELECT id, kind, pid, spawned_by, status, started_at \
+             FROM agents WHERE id = ?",
         )?;
-        let row = stmt.query_row([id], |row| {
+        let mut summary = stmt.query_row([id], |row| {
             Ok(AgentSummary {
                 id: row.get(0)?,
                 kind: row.get(1)?,
                 pid: row.get(2)?,
-                status: row.get(3)?,
-                spawned_by: row.get(4)?,
+                spawned_by: row.get(3)?,
+                status: row.get(4)?,
                 started_at: row.get(5)?,
-                tokens_remaining: row.get(6)?,
-                requests_remaining: row.get(7)?,
-                tokens_reset_at: row.get(8)?,
-                last_sample_ts: row.get(9)?,
-                total_requests: row.get(10)?,
-                rate_limited_count: row.get(11)?,
-                last_429_at: row.get(12)?,
+                ..Default::default()
             })
         })?;
-        Ok(row)
+
+        if let Ok(latest) = conn.query_row(
+            "SELECT tokens_remaining, requests_remaining, tokens_reset_at, ts \
+             FROM rate_samples WHERE agent_id = ?1 ORDER BY ts DESC LIMIT 1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        ) {
+            summary.tokens_remaining = latest.0;
+            summary.requests_remaining = latest.1;
+            summary.tokens_reset_at = latest.2;
+            summary.last_sample_ts = Some(latest.3);
+        }
+
+        if let Ok(counts) = conn.query_row(
+            "SELECT total, rate_limited, last_429_at FROM request_counts WHERE agent_id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        ) {
+            summary.total_requests = counts.0;
+            summary.rate_limited_count = counts.1;
+            summary.last_429_at = counts.2;
+        }
+
+        Ok(summary)
     }
 
     pub fn get_replay_data(&self, handoff_id: i64) -> Result<ReplayData> {
         let h = self.get_handoff(handoff_id)?;
-        let from = h.from_agent_id.and_then(|id| self.get_agent(id).ok());
-        let to = h.to_agent_id.and_then(|id| self.get_agent(id).ok());
-        let snap = h.context_snapshot_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let from = h.from_agent_id.map(|id| self.get_agent(id)).transpose()?;
+        let to = h.to_agent_id.map(|id| self.get_agent(id)).transpose()?;
+        let snap = h
+            .context_snapshot_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok());
 
         Ok(ReplayData {
             handoff: h,
@@ -501,7 +541,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, from_agent_id, to_agent_id, reason, ts, context_snapshot_path \
-             FROM handoffs ORDER BY ts DESC LIMIT ?1"
+             FROM handoffs ORDER BY ts DESC LIMIT ?1",
         )?;
         let rows = stmt.query(rusqlite::params![limit])?;
         let mut out = Vec::new();
@@ -519,32 +559,23 @@ impl Database {
         Ok(out)
     }
 
-    pub fn insert_critic_run(
-        &self,
-        project_id: i64,
-        worker_model: &str,
-        critic_model: &str,
-        worker_tokens: Option<u64>,
-        critic_tokens: Option<u64>,
-        verdict: &str,
-        notes: Option<&str>,
-    ) -> Result<i64> {
+    pub fn insert_critic_run(&self, run: CriticRunInsert<'_>) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().timestamp();
         conn.execute(
             "INSERT INTO critic_runs(\
              project_id, ts, worker_model, critic_model, \
              worker_tokens, critic_tokens, verdict, notes) \
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                project_id,
+                run.project_id,
                 now,
-                worker_model,
-                critic_model,
-                worker_tokens.map(|x| x as i64),
-                critic_tokens.map(|x| x as i64),
-                verdict,
-                notes,
+                run.worker_agent,
+                run.critic_agent,
+                run.worker_tokens.map(|x| x as i64),
+                run.critic_tokens.map(|x| x as i64),
+                run.verdict,
+                run.notes,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -670,5 +701,43 @@ mod tests {
         let row = d.find_agent_by_pid(777).unwrap().unwrap();
         assert_eq!(row.id, aid);
         assert_eq!(row.kind, "codex");
+    }
+
+    #[test]
+    fn replay_data_includes_agent_usage_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Database::open(&tmp.path().join("state.db")).unwrap();
+        let p = d.upsert_project("/replay").unwrap();
+        let from = d.insert_agent(p, "claude", Some(111), "user").unwrap();
+        let to = d.insert_agent(p, "codex", Some(222), "handoff").unwrap();
+        let sample = handoff_common::RateSample {
+            provider: "anthropic".into(),
+            tokens_remaining: Some(250),
+            requests_remaining: Some(4),
+            ..Default::default()
+        };
+        d.insert_rate_sample(from, &sample).unwrap();
+        d.bump_request_count(from, 200).unwrap();
+        d.bump_request_count(from, 429).unwrap();
+        let snap_path = tmp.path().join("snapshot.md");
+        std::fs::write(&snap_path, "# snapshot").unwrap();
+        let handoff = d
+            .insert_handoff(
+                Some(from),
+                Some(to),
+                "requests_remaining=4 < 5",
+                Some(&snap_path.display().to_string()),
+            )
+            .unwrap();
+
+        let replay = d.get_replay_data(handoff).unwrap();
+        let from_agent = replay.from_agent.unwrap();
+        assert_eq!(from_agent.kind, "claude");
+        assert_eq!(from_agent.tokens_remaining, Some(250));
+        assert_eq!(from_agent.requests_remaining, Some(4));
+        assert_eq!(from_agent.total_requests, 2);
+        assert_eq!(from_agent.rate_limited_count, 1);
+        assert_eq!(replay.to_agent.unwrap().kind, "codex");
+        assert_eq!(replay.snapshot_content.as_deref(), Some("# snapshot"));
     }
 }

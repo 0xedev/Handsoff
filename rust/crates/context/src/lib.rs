@@ -15,8 +15,8 @@
 //! The output is both machine-readable JSON (so the next agent can parse
 //! it) and a human-readable Markdown rendering.
 
-pub mod sources;
 pub mod conversations;
+pub mod sources;
 
 use std::path::{Path, PathBuf};
 
@@ -129,8 +129,9 @@ impl ContextEngine {
     /// Render `brain.md` into each adapter's native context file.
     pub fn sync(&self) -> Result<Vec<PathBuf>> {
         let brain_path = self.brain_path();
-        let body = std::fs::read_to_string(&brain_path)
-            .with_context(|| format!("no brain at {} (run `handoff init`)", brain_path.display()))?;
+        let body = std::fs::read_to_string(&brain_path).with_context(|| {
+            format!("no brain at {} (run `handoff init`)", brain_path.display())
+        })?;
         let body = strip_frontmatter(&body).to_string();
         let mut written = Vec::new();
         for adapter in all_adapters() {
@@ -156,7 +157,8 @@ impl ContextEngine {
         let git_log = sources::git::log(&self.root, 10);
         let untracked_files = sources::git::untracked_files(&self.root).unwrap_or_default();
         let recent_commands = sources::shell::recent_commands(&self.root, 20);
-        let failing_tests = sources::tests::failing_from_scratch(&self.handoff_dir().join("scratch"));
+        let failing_tests =
+            sources::tests::failing_from_scratch(&self.handoff_dir().join("scratch"));
         let intent = SnapshotIntentSource::load(&self.intent_path()).unwrap_or_default();
         let conversation_tail = conversations::claude_conversation_tail(&self.root);
 
@@ -218,7 +220,11 @@ pub fn render_markdown(s: &Snapshot) -> String {
     out.push_str(&format!("**Project:** `{}`\n\n", s.project_root));
 
     out.push_str("## Current objective\n\n");
-    out.push_str(s.current_objective.as_deref().unwrap_or("_(unset — populate `.handoff/intent.md`)_"));
+    out.push_str(
+        s.current_objective
+            .as_deref()
+            .unwrap_or("_(unset — populate `.handoff/intent.md`)_"),
+    );
     out.push_str("\n\n");
 
     out.push_str("## Next action\n\n");

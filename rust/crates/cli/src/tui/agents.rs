@@ -24,9 +24,8 @@ pub async fn fetch(daemon_url: &str) -> anyhow::Result<Vec<AgentSummary>> {
         .await?
         .json::<serde_json::Value>()
         .await?;
-    
-    let agents = serde_json::from_value(resp["result"]["agents"].clone())
-        .unwrap_or_default();
+
+    let agents = serde_json::from_value(resp["result"]["agents"].clone()).unwrap_or_default();
     Ok(agents)
 }
 
@@ -34,10 +33,10 @@ pub fn render(frame: &mut Frame, agents: &[AgentSummary], handoffs: &[String]) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // title
-            Constraint::Min(6),     // agents table
-            Constraint::Length(7),  // handoffs panel
-            Constraint::Length(3),  // footer
+            Constraint::Length(3), // title
+            Constraint::Min(6),    // agents table
+            Constraint::Length(7), // handoffs panel
+            Constraint::Length(3), // footer
         ])
         .split(frame.area());
 
@@ -48,16 +47,24 @@ pub fn render(frame: &mut Frame, agents: &[AgentSummary], handoffs: &[String]) {
     frame.render_widget(title, chunks[0]);
 
     // Agents table
-    let rows: Vec<Row> = agents.iter().map(|a| {
-        let tokens = a.tokens_remaining.map(|r| r.to_string()).unwrap_or("—".to_string());
-        Row::new(vec![
-            a.kind.clone(),
-            a.pid.map(|p| p.to_string()).unwrap_or_default(),
-            a.status.clone(),
-            tokens,
-            a.requests_remaining.map(|r| r.to_string()).unwrap_or("—".to_string()),
-        ])
-    }).collect();
+    let rows: Vec<Row> = agents
+        .iter()
+        .map(|a| {
+            let tokens = a
+                .tokens_remaining
+                .map(|r| r.to_string())
+                .unwrap_or("—".to_string());
+            Row::new(vec![
+                a.kind.clone(),
+                a.pid.map(|p| p.to_string()).unwrap_or_default(),
+                a.status.clone(),
+                tokens,
+                a.requests_remaining
+                    .map(|r| r.to_string())
+                    .unwrap_or("—".to_string()),
+            ])
+        })
+        .collect();
 
     let table = Table::new(
         rows,
@@ -69,8 +76,10 @@ pub fn render(frame: &mut Frame, agents: &[AgentSummary], handoffs: &[String]) {
             Constraint::Length(10),
         ],
     )
-    .header(Row::new(vec!["Kind", "PID", "Status", "Tokens", "Requests"])
-        .style(Style::default().fg(Color::Yellow)))
+    .header(
+        Row::new(vec!["Kind", "PID", "Status", "Tokens", "Requests"])
+            .style(Style::default().fg(Color::Yellow)),
+    )
     .block(Block::default().title("Agents").borders(Borders::ALL));
 
     frame.render_widget(table, chunks[1]);

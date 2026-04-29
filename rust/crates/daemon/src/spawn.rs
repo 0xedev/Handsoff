@@ -15,10 +15,7 @@ use tokio::process::{Child, Command};
 /// Returns true if `bin` resolves to an executable file anywhere in `$PATH`.
 fn binary_on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|path_var| {
-            std::env::split_paths(&path_var)
-                .any(|dir| dir.join(bin).is_file())
-        })
+        .map(|path_var| std::env::split_paths(&path_var).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
 }
 
@@ -37,8 +34,6 @@ pub fn proxy_env(proxy_url: &str) -> HashMap<String, String> {
     }
     env
 }
-
-
 
 /// Spawn an agent in one-shot mode with `prompt` as input. Stdout/stderr
 /// are tee'd to `~/.handoff/tee/agent-<kind>-<ts>.log`. Returns

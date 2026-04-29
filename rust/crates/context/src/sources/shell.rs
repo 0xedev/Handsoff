@@ -11,7 +11,12 @@
 use std::path::{Path, PathBuf};
 
 const SECRET_NEEDLES: &[&str] = &[
-    "AWS_", "SECRET", "TOKEN", "PASSWORD", "API_KEY", "PRIVATE_KEY",
+    "AWS_",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "API_KEY",
+    "PRIVATE_KEY",
 ];
 
 fn looks_secret(line: &str) -> bool {
@@ -40,7 +45,10 @@ fn read_file_lines(p: &Path) -> Option<Vec<String>> {
 }
 
 pub fn recent_commands(project_root: &Path, n: usize) -> Vec<String> {
-    let cmdlog = project_root.join(".handoff").join("scratch").join("cmdlog.txt");
+    let cmdlog = project_root
+        .join(".handoff")
+        .join("scratch")
+        .join("cmdlog.txt");
     if let Some(lines) = read_file_lines(&cmdlog) {
         return last_n(lines, n);
     }

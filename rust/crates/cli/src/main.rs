@@ -1,7 +1,7 @@
 //! `handoff` CLI binary.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,9 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use handoff_adapters::{all as all_adapters, snapshot_procs};
-use handoff_common::{
-    daemon_pidfile, db_path, home_dir, proxy_pidfile, AgentKind,
-};
+use handoff_common::{daemon_pidfile, db_path, home_dir, proxy_pidfile, AgentKind};
 use handoff_context::{init_project, ContextEngine};
 use handoff_storage::Database;
 
@@ -142,9 +140,7 @@ enum Cmd {
     #[command(subcommand)]
     Brain(BrainCmd),
     /// Replay a handoff event.
-    Replay {
-        handoff_id: i64,
-    },
+    Replay { handoff_id: i64 },
     /// Cheap-worker / expensive-critic loop.
     #[command(subcommand)]
     Critic(CriticCmd),
@@ -257,14 +253,13 @@ async fn main() -> Result<()> {
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     use tracing_subscriber::prelude::*;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into());
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false);
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout);
+    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
 
     tracing_subscriber::registry()
         .with(filter)
@@ -281,22 +276,41 @@ async fn main() -> Result<()> {
         Cmd::Worktree { cmd } => cmd_worktree(cmd),
         Cmd::Hook { cmd } => cmd_hook(cmd),
         Cmd::Snapshot { path, reason, json } => cmd_snapshot(path, reason, json),
-        Cmd::Spawn { kind, args, project, no_proxy, interactive, headless } => {
-            cmd_spawn(&kind, args, project, no_proxy, interactive, headless).await
-        }
+        Cmd::Spawn {
+            kind,
+            args,
+            project,
+            no_proxy,
+            interactive,
+            headless,
+        } => cmd_spawn(&kind, args, project, no_proxy, interactive, headless).await,
         Cmd::Attach { pid, kind, project } => cmd_attach(pid, kind, project).await,
-        Cmd::Handoff { to_kind, from_agent, reason, no_spawn, project } => {
-            cmd_handoff(to_kind, from_agent, reason, !no_spawn, project).await
-        }
+        Cmd::Handoff {
+            to_kind,
+            from_agent,
+            reason,
+            no_spawn,
+            project,
+        } => cmd_handoff(to_kind, from_agent, reason, !no_spawn, project).await,
         Cmd::Brain(BrainCmd::Cat { project }) => cmd_brain_cat(project),
         Cmd::Brain(BrainCmd::Edit { project }) => cmd_brain_edit(project).await,
         Cmd::Brain(BrainCmd::Append { text, project }) => cmd_brain_append(text, project).await,
         Cmd::Replay { handoff_id } => cmd_replay(handoff_id).await,
-        Cmd::Critic(CriticCmd::Run { task, project, worker, critic, no_proxy }) => {
-            cmd_critic_run(&task, project, worker, critic, no_proxy).await
-        }
+        Cmd::Critic(CriticCmd::Run {
+            task,
+            project,
+            worker,
+            critic,
+            no_proxy,
+        }) => cmd_critic_run(&task, project, worker, critic, no_proxy).await,
         Cmd::Critic(CriticCmd::Watch {
-            task, project, worker, critic, interval, debounce, no_proxy,
+            task,
+            project,
+            worker,
+            critic,
+            interval,
+            debounce,
+            no_proxy,
         }) => cmd_critic_watch(task, project, worker, critic, interval, debounce, no_proxy).await,
         Cmd::Daemon(DaemonCmd::Run { addr }) => cmd_daemon_run(addr).await,
         Cmd::Daemon(DaemonCmd::Start { addr }) => cmd_daemon_start(addr),
@@ -318,8 +332,12 @@ async fn main() -> Result<()> {
             follow,
         } => cmd_logs(target, agent_id, follow).await,
         Cmd::SimulateLimit {
-            agent_id, tokens, requests } => {
-            let url = std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+            agent_id,
+            tokens,
+            requests,
+        } => {
+            let url = std::env::var("HANDOFF_DAEMON_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
             let res = reqwest::Client::new()
                 .post(format!("{}/simulate", url))
                 .json(&serde_json::json!({
@@ -369,15 +387,14 @@ async fn cmd_doctor() -> Result<()> {
     // Daemon
     let daemon_url = std::env::var("HANDOFF_DAEMON_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:7879/health".into());
-    let daemon_alive = match reqwest::Client::new()
-        .get(&daemon_url)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => true,
-        _ => false,
-    };
+    let daemon_alive = matches!(
+        reqwest::Client::new()
+            .get(&daemon_url)
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await,
+        Ok(r) if r.status().is_success()
+    );
     out.push(format!(
         "{} daemon @ {}",
         if daemon_alive { "✓" } else { "✗" },
@@ -556,9 +573,7 @@ async fn cmd_spawn(
     // Decide the mode. Default rule: positional args present → headless.
     let mode = if force_interactive {
         SpawnMode::Interactive
-    } else if force_headless {
-        SpawnMode::Headless
-    } else if !args.is_empty() {
+    } else if force_headless || !args.is_empty() {
         SpawnMode::Headless
     } else {
         SpawnMode::Interactive
@@ -703,7 +718,7 @@ async fn cmd_handoff(
 
 // --- brain --------------------------------------------------------------
 
-fn brain_path(project: &PathBuf) -> Result<PathBuf> {
+fn brain_path(project: &Path) -> Result<PathBuf> {
     let p = project.canonicalize()?.join(".handoff").join("brain.md");
     if !p.exists() {
         return Err(anyhow!("no brain at {} — run `handoff init`", p.display()));
@@ -735,8 +750,9 @@ async fn cmd_brain_edit(project: PathBuf) -> Result<()> {
 
 async fn cmd_brain_append(text: String, project: PathBuf) -> Result<()> {
     let project_root = project.canonicalize()?;
-    let url = std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
-    
+    let url =
+        std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+
     let res = reqwest::Client::new()
         .post(format!("{}/brain/append", url))
         .json(&serde_json::json!({
@@ -752,9 +768,7 @@ async fn cmd_brain_append(text: String, project: PathBuf) -> Result<()> {
         }
         _ => {
             let p = brain_path(&project)?;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&p)?;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&p)?;
             use std::io::Write;
             writeln!(file, "\n{}", text)?;
             println!("appended to brain.md (direct)");
@@ -907,7 +921,7 @@ fn cmd_daemon_stop() -> Result<()> {
 
 async fn cmd_daemon_status() -> Result<()> {
     match reqwest::Client::new()
-        .get(format!("http://127.0.0.1:7879/health"))
+        .get("http://127.0.0.1:7879/health")
         .timeout(Duration::from_secs(1))
         .send()
         .await
@@ -1040,8 +1054,8 @@ fn stop_pidfile(pidfile: &std::path::Path) -> Result<()> {
 }
 
 async fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-    let url = std::env::var("HANDOFF_DAEMON_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7879/rpc".into());
+    let url =
+        std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879/rpc".into());
     let body = serde_json::json!({"method": method, "params": params});
     let resp = reqwest::Client::new()
         .post(&url)
@@ -1162,19 +1176,27 @@ async fn cmd_logs(target: String, agent_id: Option<i64>, follow: bool) -> Result
 async fn cmd_replay(handoff_id: i64) -> Result<()> {
     let db = Database::open(&db_path())?;
     let data = db.get_replay_data(handoff_id)?;
-    
+
     println!("=== Handoff #{} Replay ===", data.handoff.id);
-    println!("Time:   {}", chrono::DateTime::from_timestamp(data.handoff.ts, 0).map(|ts| ts.to_rfc3339()).unwrap_or_else(|| "unknown".into()));
+    println!(
+        "Time:   {}",
+        chrono::DateTime::from_timestamp(data.handoff.ts, 0)
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| "unknown".into())
+    );
     println!("Reason: {}", data.handoff.reason);
-    
+
     if let Some(from) = data.from_agent {
-        println!("From:   {} (#{}) [status={}]", from.kind, from.id, from.status);
+        println!(
+            "From:   {} (#{}) [status={}]",
+            from.kind, from.id, from.status
+        );
     }
-    
+
     if let Some(to) = data.to_agent {
         println!("To:     {} (#{}) [pid={:?}]", to.kind, to.id, to.pid);
     }
-    
+
     if let Some(snap) = data.snapshot_content {
         println!("\n--- Snapshot Content (first 20 lines) ---");
         for line in snap.lines().take(20) {
@@ -1184,36 +1206,42 @@ async fn cmd_replay(handoff_id: i64) -> Result<()> {
             println!("...");
         }
     }
-    
+
     Ok(())
 }
 
 fn cmd_stats(days: u32, graph: bool) -> Result<()> {
     let db = Database::open(&db_path())?;
     let stats = db.daily_stats(days)?;
-    
-    println!("{:<12} {:<10} {:<10} {:<15} {:<10}", "Date", "Kind", "Requests", "Avg Tokens", "Handoffs");
+
+    println!(
+        "{:<12} {:<10} {:<10} {:<15} {:<10}",
+        "Date", "Kind", "Requests", "Avg Tokens", "Handoffs"
+    );
     println!("{}", "-".repeat(60));
-    
+
     for s in stats {
         let bar = if graph {
             let filled = (s.avg_tokens_remaining.unwrap_or(0.0) / 1000.0) as usize;
-            format!(" [{}{}]", "█".repeat(filled.min(20)), " ".repeat(20 - filled.min(20)))
+            format!(
+                " [{}{}]",
+                "█".repeat(filled.min(20)),
+                " ".repeat(20 - filled.min(20))
+            )
         } else {
             String::new()
         };
-        
-        println!("{:<12} {:<10} {:<10} {:<15.0} {:<10}{}", 
-            s.date, 
-            s.kind, 
-            s.total_requests, 
-            s.avg_tokens_remaining.unwrap_or(0.0), 
+
+        println!(
+            "{:<12} {:<10} {:<10} {:<15.0} {:<10}{}",
+            s.date,
+            s.kind,
+            s.total_requests,
+            s.avg_tokens_remaining.unwrap_or(0.0),
             s.handoff_count,
-            bar);
+            bar
+        );
     }
-    
+
     Ok(())
 }
-
-
-

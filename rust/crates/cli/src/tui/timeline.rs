@@ -22,9 +22,8 @@ pub async fn fetch(daemon_url: &str) -> anyhow::Result<Vec<HandoffSummary>> {
         .await?
         .json::<serde_json::Value>()
         .await?;
-    
-    let handoffs = serde_json::from_value(resp["handoffs"].clone())
-        .unwrap_or_default();
+
+    let handoffs = serde_json::from_value(resp["handoffs"].clone()).unwrap_or_default();
     Ok(handoffs)
 }
 
@@ -32,9 +31,9 @@ pub fn render(frame: &mut Frame, handoffs: &[HandoffSummary]) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // title
-            Constraint::Min(10),    // timeline
-            Constraint::Length(3),  // footer
+            Constraint::Length(3), // title
+            Constraint::Min(10),   // timeline
+            Constraint::Length(3), // footer
         ])
         .split(frame.area());
 
@@ -46,23 +45,30 @@ pub fn render(frame: &mut Frame, handoffs: &[HandoffSummary]) {
     frame.render_widget(title, chunks[0]);
 
     // Timeline List
-    let items: Vec<ListItem> = handoffs.iter().map(|h| {
-        let time = chrono::DateTime::from_timestamp(h.ts, 0)
-            .map(|dt| dt.format("%H:%M:%S").to_string())
-            .unwrap_or_else(|| "??:??:??".into());
-        
-        let content = format!(
-            "[{}] Agent #{} → #{} | Reason: {}",
-            time,
-            h.from_agent_id.unwrap_or(0),
-            h.to_agent_id.unwrap_or(0),
-            h.reason
-        );
-        ListItem::new(content)
-    }).collect();
+    let items: Vec<ListItem> = handoffs
+        .iter()
+        .map(|h| {
+            let time = chrono::DateTime::from_timestamp(h.ts, 0)
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "??:??:??".into());
+
+            let content = format!(
+                "[{}] Agent #{} → #{} | Reason: {}",
+                time,
+                h.from_agent_id.unwrap_or(0),
+                h.to_agent_id.unwrap_or(0),
+                h.reason
+            );
+            ListItem::new(content)
+        })
+        .collect();
 
     let list = List::new(items)
-        .block(Block::default().title("Handoff History").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Handoff History")
+                .borders(Borders::ALL),
+        )
         .style(Style::default().fg(Color::White));
 
     frame.render_widget(list, chunks[1]);

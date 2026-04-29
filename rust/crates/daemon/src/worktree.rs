@@ -75,12 +75,12 @@ pub fn remove(project_root: &Path, agent_id: i64) -> Result<()> {
     if !wt.exists() {
         return Ok(());
     }
-    
+
     let _ = Command::new("git")
         .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
         .current_dir(project_root)
         .status()?;
-    
+
     // Prune stale worktrees just in case
     let _ = Command::new("git")
         .args(["worktree", "prune"])
@@ -95,7 +95,7 @@ pub fn list(project_root: &Path) -> Result<Vec<PathBuf>> {
         .args(["worktree", "list", "--porcelain"])
         .current_dir(project_root)
         .output()?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut out = Vec::new();
     for line in stdout.lines() {

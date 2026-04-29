@@ -4,9 +4,9 @@
 //! installs it into the OS trust store so the MITM proxy can intercept HTTPS.
 //! `run_teardown()` revokes the CA and cleans up system trust entries.
 
+use anyhow::Result;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use anyhow::Result;
 
 pub fn ca_install_command(cert_path: &Path) -> Option<Vec<String>> {
     let p = cert_path.to_string_lossy().to_string();
@@ -88,11 +88,19 @@ pub async fn run_teardown() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let status = Command::new("sudo")
-            .args(["security", "delete-certificate", "-c", "handoff", "/Library/Keychains/System.keychain"])
+            .args([
+                "security",
+                "delete-certificate",
+                "-c",
+                "handoff",
+                "/Library/Keychains/System.keychain",
+            ])
             .status();
         match status {
             Ok(s) if s.success() => println!("  ✓ CA removed from macOS Keychain"),
-            _ => println!("  ⚠ Could not remove CA automatically. Open Keychain Access and delete 'handoff'."),
+            _ => println!(
+                "  ⚠ Could not remove CA automatically. Open Keychain Access and delete 'handoff'."
+            ),
         }
     }
 

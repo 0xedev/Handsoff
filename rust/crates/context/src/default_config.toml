@@ -11,10 +11,14 @@ requests_remaining = 5
 # Order to try when the active agent runs out.
 chain = ["claude", "codex", "copilot"]
 auto_spawn = true
-# Use the critic model to summarize handoff briefs (otherwise verbatim brain).
+# Use the critic agent to summarize handoff briefs (otherwise verbatim brain).
 summarize = false
 
 [critic]
-worker_model = "claude-haiku-4-5-20251001"
-critic_model = "claude-opus-4-7"
-summarizer_model = "claude-opus-4-7"
+# Local agent CLIs used by the worker/critic loop.
+# v0.4.0-alpha keys (worker_model / critic_model / summarizer_model)
+# are still accepted as aliases, but values should be agent names.
+worker_agent = "claude"
+critic_agent = "claude"
+summarizer_agent = "claude"
+max_rounds = 3

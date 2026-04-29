@@ -6,7 +6,11 @@ use std::process::Command;
 use handoff_common::GitHead;
 
 fn run(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).current_dir(root).output().ok()?;
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -61,7 +65,11 @@ mod tests {
     use std::process::Command;
 
     fn init_repo(dir: &Path) {
-        Command::new("git").args(["init", "-q"]).current_dir(dir).output().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
         for kv in [
             ("user.email", "t@t"),
             ("user.name", "t"),

@@ -59,10 +59,9 @@ fn normalize(mut s: SnapshotIntentSource) -> SnapshotIntentSource {
 }
 
 fn extract_toml_block(body: &str) -> Option<String> {
-    let mut lines = body.lines();
     let mut in_block = false;
     let mut buf = String::new();
-    while let Some(line) = lines.next() {
+    for line in body.lines() {
         let trimmed = line.trim_start();
         if !in_block && (trimmed == "```toml" || trimmed.starts_with("```toml ")) {
             in_block = true;

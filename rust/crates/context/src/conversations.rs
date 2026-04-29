@@ -14,19 +14,23 @@ pub fn claude_conversation_tail(_project_root: &Path) -> Option<String> {
     let latest_jsonl = find_latest_jsonl(&projects_dir)?;
     let content = std::fs::read_to_string(&latest_jsonl).ok()?;
     let lines: Vec<&str> = content.lines().collect();
-    
+
     // Take last 20 lines — enough for the last exchange
     let count = lines.len();
     let start = count.saturating_sub(20);
     let tail = &lines[start..];
     let tail_str = tail.join("\n");
-    
-    Some(format!("<!-- last ~20 lines of {} -->\n{}", latest_jsonl.display(), tail_str))
+
+    Some(format!(
+        "<!-- last ~20 lines of {} -->\n{}",
+        latest_jsonl.display(),
+        tail_str
+    ))
 }
 
 fn find_latest_jsonl(dir: &Path) -> Option<PathBuf> {
     let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
-    
+
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
@@ -47,6 +51,6 @@ fn find_latest_jsonl(dir: &Path) -> Option<PathBuf> {
             }
         }
     }
-    
+
     latest.map(|(p, _)| p)
 }
