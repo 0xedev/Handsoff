@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# install.sh — handoff one-liner installer
+# install.sh — handoff one-liner installer from GitHub Releases
 set -e
 
 REPO="0xedev/handoff"
