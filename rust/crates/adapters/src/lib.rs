@@ -369,9 +369,6 @@ impl Adapter for GeminiAdapter {
                 continue;
             }
             let lower_name = p.name.to_ascii_lowercase();
-            if lower_name.contains("helper") || lower_name.contains("crashpad") {
-                continue;
-            }
             let head = p
                 .cmdline
                 .first()
@@ -382,6 +379,11 @@ impl Adapter for GeminiAdapter {
             let cmdline_joined = p.cmdline.join(" ").to_ascii_lowercase();
             let by_name = bins.contains(&head) || bins.contains(&lower_name);
             let by_app = app_markers.iter().any(|m| cmdline_joined.contains(m));
+            // Skip helper/crashpad processes unless they match an app marker
+            // (e.g. "Code Helper (Plugin)" running geminicodeassist)
+            if !by_app && (lower_name.contains("helper") || lower_name.contains("crashpad")) {
+                continue;
+            }
             if by_name || by_app {
                 out.push(ProcessMatch {
                     pid: p.pid,
@@ -573,17 +575,50 @@ mod tests {
                     "--type=renderer",
                 ],
             ),
-            ProcInfo {
-                pid: 202,
-                name: "Antigravity".into(),
-                cmdline: Vec::new(),
-            },
         ];
         let m = CursorAdapter.detect(&procs);
         let pids: Vec<i64> = m.iter().map(|x| x.pid).collect();
         assert!(pids.contains(&200));
         assert!(!pids.contains(&201));
-        assert!(pids.contains(&202));
+    }
+
+    #[test]
+    fn gemini_detects_antigravity() {
+        let procs = vec![
+            proc(
+                300,
+                "Electron",
+                &["/Applications/Antigravity.app/Contents/MacOS/Electron"],
+            ),
+            proc(
+                301,
+                "language_server_macos_x64",
+                &["/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/bin/language_server_macos_x64", "--enable_lsp"],
+            ),
+            proc(
+                302,
+                "Antigravity Helper",
+                &[
+                    "/Applications/Antigravity.app/Contents/Frameworks/Helper",
+                    "--type=renderer",
+                ],
+            ),
+            proc(
+                303,
+                "Code Helper (Plugin)",
+                &["/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)", "/Users/test/.vscode/extensions/google.geminicodeassist-2.79.0/agent/a2a-server.mjs"],
+            ),
+        ];
+        let m = GeminiAdapter.detect(&procs);
+        let pids: Vec<i64> = m.iter().map(|x| x.pid).collect();
+        // Main Electron process detected via antigravity.app in cmdline
+        assert!(pids.contains(&300), "should detect main Antigravity Electron process");
+        // language_server binary detected by name
+        assert!(pids.contains(&301), "should detect language_server_macos_x64");
+        // Helper with --type= filtered out
+        assert!(!pids.contains(&302), "should skip Antigravity Helper with --type=");
+        // VS Code plugin with geminicodeassist in path detected
+        assert!(pids.contains(&303), "should detect geminicodeassist VS Code plugin");
     }
 
     #[test]
