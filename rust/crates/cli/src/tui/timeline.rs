@@ -52,12 +52,18 @@ pub fn render(frame: &mut Frame, handoffs: &[HandoffSummary]) {
                 .map(|dt| dt.format("%H:%M:%S").to_string())
                 .unwrap_or_else(|| "??:??:??".into());
 
+            let from_str = h
+                .from_agent_id
+                .map(|id| format!("#{id}"))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let to_str = h
+                .to_agent_id
+                .map(|id| format!("#{id}"))
+                .unwrap_or_else(|| "Unknown".to_string());
+
             let content = format!(
-                "[{}] Agent #{} → #{} | Reason: {}",
-                time,
-                h.from_agent_id.unwrap_or(0),
-                h.to_agent_id.unwrap_or(0),
-                h.reason
+                "[{}] Agent {} → {} | Reason: {}",
+                time, from_str, to_str, h.reason
             );
             ListItem::new(content)
         })

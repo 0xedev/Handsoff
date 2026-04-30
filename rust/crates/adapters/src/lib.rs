@@ -35,6 +35,13 @@ pub trait Adapter: Send + Sync {
             .collect();
         let mut out = Vec::new();
         for p in procs {
+            if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
+                continue;
+            }
+            let lower_name = p.name.to_ascii_lowercase();
+            if lower_name.contains("helper") || lower_name.contains("crashpad") {
+                continue;
+            }
             let head = p
                 .cmdline
                 .first()
