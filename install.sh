@@ -2,7 +2,7 @@
 # install.sh — handoff one-liner installer from GitHub Releases
 set -e
 
-REPO="0xedev/handoff"
+REPO="0xedev/Handsoff"
 BIN_DIR="${HANDOFF_BIN_DIR:-/usr/local/bin}"
 TMP_DIR="$(mktemp -d)"
 
