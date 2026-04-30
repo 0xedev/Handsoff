@@ -146,6 +146,7 @@ pub struct ClaudeAdapter;
 pub struct CodexAdapter;
 pub struct CopilotAdapter;
 pub struct CursorAdapter;
+pub struct AntigravityAdapter;
 pub struct GeminiAdapter;
 pub struct AiderAdapter;
 pub struct ClineAdapter;
@@ -351,10 +352,13 @@ impl Adapter for GeminiAdapter {
         AgentKind::Gemini
     }
     fn binaries(&self) -> &'static [&'static str] {
-        &["gemini", "language_server_macos_x64", "language_server_linux_x64"]
+        &["gemini"]
     }
     fn api_hosts(&self) -> &'static [&'static str] {
-        &["generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com"]
+        &[
+            "generativelanguage.googleapis.com",
+            "cloudcode-pa.googleapis.com",
+        ]
     }
     fn detect(&self, procs: &[ProcInfo]) -> Vec<ProcessMatch> {
         let bins: Vec<String> = self
@@ -362,7 +366,7 @@ impl Adapter for GeminiAdapter {
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
-        let app_markers: &[&str] = &["antigravity.app", "geminicodeassist"];
+        let app_markers: &[&str] = &["geminicodeassist"];
         let mut out = Vec::new();
         for p in procs {
             if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
@@ -402,6 +406,69 @@ impl Adapter for GeminiAdapter {
     }
     fn headless_args(&self, prompt: &str) -> Option<Vec<String>> {
         Some(vec!["-p".into(), prompt.into()])
+    }
+}
+
+impl Adapter for AntigravityAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Antigravity
+    }
+    fn binaries(&self) -> &'static [&'static str] {
+        &[
+            "antigravity",
+            "Antigravity",
+            "Electron",
+            "language_server_macos_x64",
+            "language_server_linux_x64",
+        ]
+    }
+    fn api_hosts(&self) -> &'static [&'static str] {
+        &[
+            "generativelanguage.googleapis.com",
+            "cloudcode-pa.googleapis.com",
+        ]
+    }
+    fn detect(&self, procs: &[ProcInfo]) -> Vec<ProcessMatch> {
+        let bins: Vec<String> = self
+            .binaries()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let app_markers: &[&str] = &["antigravity.app"];
+        let mut out = Vec::new();
+        for p in procs {
+            if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
+                continue;
+            }
+            let lower_name = p.name.to_ascii_lowercase();
+            let head = p
+                .cmdline
+                .first()
+                .and_then(|arg| Path::new(arg).file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let cmdline_joined = p.cmdline.join(" ").to_ascii_lowercase();
+            let by_app = app_markers.iter().any(|m| cmdline_joined.contains(m));
+            if !by_app {
+                continue;
+            }
+            let by_name = bins.contains(&head) || bins.contains(&lower_name);
+            if by_name || lower_name.contains("electron") {
+                out.push(ProcessMatch {
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    cmdline: p.cmdline.clone(),
+                });
+            }
+        }
+        out
+    }
+    fn context_files(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join("AGENTS.md"), root.join("GEMINI.md")]
+    }
+    fn parse_headers(&self, _headers: &BTreeMap<String, String>) -> Option<RateSample> {
+        None
     }
 }
 
@@ -453,6 +520,7 @@ pub fn all() -> Vec<Box<dyn Adapter>> {
         Box::new(CodexAdapter),
         Box::new(CopilotAdapter),
         Box::new(CursorAdapter),
+        Box::new(AntigravityAdapter),
         Box::new(GeminiAdapter),
         Box::new(AiderAdapter),
         Box::new(ClineAdapter),
@@ -465,6 +533,7 @@ pub fn for_kind(kind: AgentKind) -> Box<dyn Adapter> {
         AgentKind::Codex => Box::new(CodexAdapter),
         AgentKind::Copilot => Box::new(CopilotAdapter),
         AgentKind::Cursor => Box::new(CursorAdapter),
+        AgentKind::Antigravity => Box::new(AntigravityAdapter),
         AgentKind::Gemini => Box::new(GeminiAdapter),
         AgentKind::Aider => Box::new(AiderAdapter),
         AgentKind::Cline => Box::new(ClineAdapter),
@@ -483,14 +552,22 @@ pub fn snapshot_procs() -> Vec<ProcInfo> {
     sys.refresh_processes(ProcessesToUpdate::All);
     sys.processes()
         .iter()
-        .map(|(pid, proc)| ProcInfo {
-            pid: pid.as_u32() as i64,
-            name: proc.name().to_string_lossy().into_owned(),
-            cmdline: proc
+        .map(|(pid, proc)| {
+            let mut cmdline: Vec<String> = proc
                 .cmd()
                 .iter()
                 .map(|s| s.to_string_lossy().into_owned())
-                .collect(),
+                .collect();
+            if let Some(exe) = proc.exe().and_then(|p| p.to_str()) {
+                if !cmdline.iter().any(|arg| arg == exe) {
+                    cmdline.insert(0, exe.to_string());
+                }
+            }
+            ProcInfo {
+                pid: pid.as_u32() as i64,
+                name: proc.name().to_string_lossy().into_owned(),
+                cmdline,
+            }
         })
         .collect()
 }
@@ -583,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_detects_antigravity() {
+    fn antigravity_detects_app_processes() {
         let procs = vec![
             proc(
                 300,
@@ -609,16 +686,50 @@ mod tests {
                 &["/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)", "/Users/test/.vscode/extensions/google.geminicodeassist-2.79.0/agent/a2a-server.mjs"],
             ),
         ];
+        let m = AntigravityAdapter.detect(&procs);
+        let pids: Vec<i64> = m.iter().map(|x| x.pid).collect();
+        assert!(
+            pids.contains(&300),
+            "should detect main Antigravity Electron process"
+        );
+        assert!(
+            pids.contains(&301),
+            "should detect language_server_macos_x64"
+        );
+        assert!(
+            !pids.contains(&302),
+            "should skip Antigravity Helper with --type="
+        );
+        assert!(
+            !pids.contains(&303),
+            "should not classify Gemini Code Assist as Antigravity"
+        );
+    }
+
+    #[test]
+    fn gemini_detects_code_assist_extension() {
+        let procs = vec![
+            proc(
+                303,
+                "Code Helper (Plugin)",
+                &["/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)", "/Users/test/.vscode/extensions/google.geminicodeassist-2.79.0/agent/a2a-server.mjs"],
+            ),
+            proc(
+                304,
+                "Electron",
+                &["/Applications/Antigravity.app/Contents/MacOS/Electron"],
+            ),
+        ];
         let m = GeminiAdapter.detect(&procs);
         let pids: Vec<i64> = m.iter().map(|x| x.pid).collect();
-        // Main Electron process detected via antigravity.app in cmdline
-        assert!(pids.contains(&300), "should detect main Antigravity Electron process");
-        // language_server binary detected by name
-        assert!(pids.contains(&301), "should detect language_server_macos_x64");
-        // Helper with --type= filtered out
-        assert!(!pids.contains(&302), "should skip Antigravity Helper with --type=");
-        // VS Code plugin with geminicodeassist in path detected
-        assert!(pids.contains(&303), "should detect geminicodeassist VS Code plugin");
+        assert!(
+            pids.contains(&303),
+            "should detect geminicodeassist VS Code plugin"
+        );
+        assert!(
+            !pids.contains(&304),
+            "should not classify Antigravity as generic Gemini"
+        );
     }
 
     #[test]

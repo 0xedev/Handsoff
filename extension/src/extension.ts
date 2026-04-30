@@ -10,6 +10,41 @@ interface IngestPayload {
   sample: Record<string, unknown> | null;
 }
 
+interface CompanionConfig {
+  daemonUrl: string;
+  kind: string;
+  heartbeatSeconds: number;
+  detectExtensions: boolean;
+}
+
+interface ExtensionMatcher {
+  kind: string;
+  needles: string[];
+}
+
+const KNOWN_AI_EXTENSIONS: ExtensionMatcher[] = [
+  {
+    kind: "codex",
+    needles: ["openai.chatgpt", "openai.codex", ".codex", "codex"],
+  },
+  {
+    kind: "claude",
+    needles: ["anthropic.claude-code", "claude-code", "claude code"],
+  },
+  {
+    kind: "copilot",
+    needles: ["github.copilot", "github.copilot-chat", "copilot"],
+  },
+  {
+    kind: "antigravity",
+    needles: ["antigravity"],
+  },
+  {
+    kind: "gemini",
+    needles: ["google.geminicodeassist", "geminicodeassist", "gemini code assist"],
+  },
+];
+
 function postIngest(daemonUrl: string, payload: IngestPayload): void {
   let target: URL;
   try {
@@ -47,13 +82,55 @@ function postIngest(daemonUrl: string, payload: IngestPayload): void {
   req.end();
 }
 
-function readConfig(): { daemonUrl: string; kind: string; heartbeatSeconds: number } {
+function readConfig(): CompanionConfig {
   const cfg = vscode.workspace.getConfiguration("handoff");
   return {
     daemonUrl: cfg.get<string>("daemonUrl", "http://127.0.0.1:7879"),
-    kind: cfg.get<string>("kind", "cursor"),
+    kind: cfg.get<string>("kind", "auto"),
     heartbeatSeconds: cfg.get<number>("heartbeatSeconds", 30),
+    detectExtensions: cfg.get<boolean>("detectExtensions", true),
   };
+}
+
+function extensionSearchText(extension: vscode.Extension<unknown>): string {
+  const pkg = extension.packageJSON as Record<string, unknown>;
+  return [
+    extension.id,
+    pkg.name,
+    pkg.displayName,
+    pkg.description,
+    pkg.publisher,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
+    .toLowerCase();
+}
+
+function detectActiveExtensionKinds(): string[] {
+  const kinds = new Set<string>();
+  for (const extension of vscode.extensions.all) {
+    if (!extension.isActive) {
+      continue;
+    }
+    const haystack = extensionSearchText(extension);
+    for (const matcher of KNOWN_AI_EXTENSIONS) {
+      if (matcher.needles.some((needle) => haystack.includes(needle))) {
+        kinds.add(matcher.kind);
+      }
+    }
+  }
+  return [...kinds].sort();
+}
+
+function reportedKinds(config: CompanionConfig): string[] {
+  if (config.kind !== "auto") {
+    return [config.kind];
+  }
+  if (!config.detectExtensions) {
+    return ["vscode"];
+  }
+  const detected = detectActiveExtensionKinds();
+  return detected.length > 0 ? detected : ["vscode"];
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -61,14 +138,16 @@ export function activate(context: vscode.ExtensionContext): void {
   out.appendLine(`handoff companion activated (pid=${process.pid})`);
 
   const sendHeartbeat = (statusCode: number = 200): void => {
-    const { daemonUrl, kind } = readConfig();
-    postIngest(daemonUrl, {
-      kind,
-      host: "vscode-extension",
-      status_code: statusCode,
-      pid: process.pid,
-      sample: null,
-    });
+    const config = readConfig();
+    for (const kind of reportedKinds(config)) {
+      postIngest(config.daemonUrl, {
+        kind,
+        host: `vscode-extension:${kind}`,
+        status_code: statusCode,
+        pid: process.pid,
+        sample: null,
+      });
+    }
   };
 
   // Initial heartbeat + interval
@@ -80,7 +159,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("handoff.heartbeatSeconds")) {
+      if (
+        e.affectsConfiguration("handoff.heartbeatSeconds") ||
+        e.affectsConfiguration("handoff.kind") ||
+        e.affectsConfiguration("handoff.detectExtensions")
+      ) {
         clearInterval(interval);
         interval = setInterval(
           sendHeartbeat,
@@ -121,10 +204,20 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!remaining) {
         return;
       }
-      const { daemonUrl, kind } = readConfig();
-      postIngest(daemonUrl, {
+      const config = readConfig();
+      const kinds = reportedKinds(config);
+      const kind =
+        kinds.length === 1
+          ? kinds[0]
+          : await vscode.window.showQuickPick(kinds, {
+              placeHolder: "Which agent should receive this usage sample?",
+            });
+      if (!kind) {
+        return;
+      }
+      postIngest(config.daemonUrl, {
         kind,
-        host: "vscode-extension-manual",
+        host: `vscode-extension-manual:${kind}`,
         status_code: 200,
         pid: process.pid,
         sample: {

@@ -33,16 +33,80 @@ fn shell_hook_script() -> String {
     r#"#!/usr/bin/env sh
 # handoff shell hook
 mkdir -p "$HOME/.handoff"
+
+handoff_should_proxy_command() {
+  case "$1" in
+    claude|claude\ *|claude-code|claude-code\ *|codex|codex\ *|gh\ copilot|gh\ copilot\ *|gemini|gemini\ *|aider|aider\ *|cline|cline\ *)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+handoff_save_var() {
+  eval "if [ \"\${$1+x}\" = x ]; then export HANDOFF_OLD_$1=\"\${$1}\"; export HANDOFF_OLD_${1}_SET=1; else unset HANDOFF_OLD_$1; export HANDOFF_OLD_${1}_SET=0; fi"
+}
+
+handoff_restore_var() {
+  eval "if [ \"\${HANDOFF_OLD_${1}_SET-0}\" = 1 ]; then export $1=\"\${HANDOFF_OLD_$1}\"; else unset $1; fi; unset HANDOFF_OLD_$1 HANDOFF_OLD_${1}_SET"
+}
+
+handoff_enable_proxy() {
+  if [ -n "${HANDOFF_PROXY_ACTIVE-}" ]; then
+    return
+  fi
+  handoff_save_var HTTP_PROXY
+  handoff_save_var HTTPS_PROXY
+  handoff_save_var ALL_PROXY
+  handoff_save_var NODE_EXTRA_CA_CERTS
+  handoff_save_var REQUESTS_CA_BUNDLE
+  handoff_save_var SSL_CERT_FILE
+  export HANDOFF_PROXY_ACTIVE=1
+  export HTTP_PROXY="${HANDOFF_PROXY_URL:-http://127.0.0.1:8080}"
+  export HTTPS_PROXY="${HANDOFF_PROXY_URL:-http://127.0.0.1:8080}"
+  export ALL_PROXY="${HANDOFF_PROXY_URL:-http://127.0.0.1:8080}"
+  export NODE_EXTRA_CA_CERTS="$HOME/.handoff/ca/cert.pem"
+  export REQUESTS_CA_BUNDLE="$HOME/.handoff/ca/cert.pem"
+  export SSL_CERT_FILE="$HOME/.handoff/ca/cert.pem"
+}
+
+handoff_restore_proxy() {
+  if [ -z "${HANDOFF_PROXY_ACTIVE-}" ]; then
+    return
+  fi
+  handoff_restore_var HTTP_PROXY
+  handoff_restore_var HTTPS_PROXY
+  handoff_restore_var ALL_PROXY
+  handoff_restore_var NODE_EXTRA_CA_CERTS
+  handoff_restore_var REQUESTS_CA_BUNDLE
+  handoff_restore_var SSL_CERT_FILE
+  unset HANDOFF_PROXY_ACTIVE
+}
+
+handoff_log_command() {
+  printf '%s\n' "$1" >> "$HOME/.handoff/cmdlog.txt"
+}
+
+handoff_before_command() {
+  handoff_log_command "$1"
+  if handoff_should_proxy_command "$1"; then
+    handoff_enable_proxy
+  else
+    handoff_restore_proxy
+  fi
+}
+
 if [ -n "${ZSH_VERSION-}" ]; then
   if command -v add-zsh-hook >/dev/null 2>&1; then
     autoload -Uz add-zsh-hook >/dev/null 2>&1 || true
-    handoff_log_command() {
-      printf '%s\n' "$1" >> "$HOME/.handoff/cmdlog.txt"
-    }
-    add-zsh-hook preexec handoff_log_command
+    add-zsh-hook preexec handoff_before_command
+    add-zsh-hook precmd handoff_restore_proxy
   fi
 elif [ -n "${BASH_VERSION-}" ]; then
-  trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/.handoff/cmdlog.txt"' DEBUG
+  trap 'handoff_before_command "$BASH_COMMAND"' DEBUG
+  PROMPT_COMMAND="handoff_restore_proxy${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi
 "#
     .to_string()
@@ -164,5 +228,16 @@ mod tests {
         let s = hook_script("http://localhost:9999");
         assert!(s.contains("http://localhost:9999/hook"));
         assert!(s.contains("python3"));
+    }
+
+    #[test]
+    fn shell_hook_proxies_known_agent_commands() {
+        let script = shell_hook_script();
+        assert!(script.contains("handoff_should_proxy_command"));
+        assert!(script.contains("claude|claude\\ *"));
+        assert!(script.contains("codex|codex\\ *"));
+        assert!(script.contains("gh\\ copilot"));
+        assert!(script.contains("HTTPS_PROXY"));
+        assert!(script.contains("NODE_EXTRA_CA_CERTS"));
     }
 }

@@ -296,7 +296,7 @@ pub fn render(frame: &mut Frame, data: &DashboardData, handoffs: &[String]) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(10),
@@ -355,7 +355,7 @@ fn render_summary(data: &DashboardData) -> String {
         "daemon connected | observer: {observer}\n\
          live agents: {} | discovered now: {} | stale records hidden: {} | services hidden: {} | tracked records: {}\n\
          requests seen: {} | agents with rate samples: {} | 429s: {}\n\
-         rate limits appear after Claude/Codex traffic goes through the Handsoff proxy",
+         rate limits appear after provider traffic goes through the proxy or companion reports usage",
         data.agents.len(),
         data.discovered_count,
         data.stale_count,

@@ -865,7 +865,7 @@ fn cmd_discover() -> Result<()> {
             let cmd = m.cmdline.join(" ");
             let truncated: String = cmd.chars().take(80).collect();
             println!(
-                "{:<10}  pid={:<6}  {}",
+                "{:<12}  pid={:<6}  {}",
                 adapter.kind().as_str(),
                 m.pid,
                 truncated

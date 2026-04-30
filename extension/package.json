@@ -14,7 +14,7 @@
     "commands": [
       {
         "command": "handoff.reportUsage",
-        "title": "handoff: report current Copilot / Cursor usage"
+        "title": "handoff: report current agent usage"
       },
       {
         "command": "handoff.ping",
@@ -31,9 +31,23 @@
         },
         "handoff.kind": {
           "type": "string",
-          "enum": ["cursor", "antigravity", "vscode"],
-          "default": "cursor",
-          "description": "Which IDE this companion is reporting for."
+          "enum": [
+            "auto",
+            "claude",
+            "codex",
+            "copilot",
+            "cursor",
+            "antigravity",
+            "gemini",
+            "vscode"
+          ],
+          "default": "auto",
+          "description": "Which agent this companion reports for. Use auto to report active Claude, Codex, Copilot, Antigravity, or Gemini extensions."
+        },
+        "handoff.detectExtensions": {
+          "type": "boolean",
+          "default": true,
+          "description": "When kind is auto, report active AI extensions running inside the editor."
         },
         "handoff.heartbeatSeconds": {
           "type": "number",
