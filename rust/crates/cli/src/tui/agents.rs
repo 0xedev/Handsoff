@@ -40,13 +40,11 @@ pub fn render(frame: &mut Frame, agents: &[AgentSummary], handoffs: &[String]) {
         ])
         .split(frame.area());
 
-    // Title bar
     let title = Block::default()
-        .title(" handoff agents ")
+        .title(" handoff live dashboard ")
         .borders(Borders::ALL);
     frame.render_widget(title, chunks[0]);
 
-    // Agents table
     let rows: Vec<Row> = agents
         .iter()
         .map(|a| {
@@ -77,26 +75,28 @@ pub fn render(frame: &mut Frame, agents: &[AgentSummary], handoffs: &[String]) {
         ],
     )
     .header(
-        Row::new(vec!["Kind", "PID", "Status", "Tokens", "Requests"])
+        Row::new(vec!["Agent", "PID", "State", "Tokens left", "Req left"])
             .style(Style::default().fg(Color::Yellow)),
     )
-    .block(Block::default().title("Agents").borders(Borders::ALL));
+    .block(
+        Block::default()
+            .title("Running Agents")
+            .borders(Borders::ALL),
+    );
 
     frame.render_widget(table, chunks[1]);
 
-    // Handoffs panel
     let handoff_text = handoffs.join("\n");
     let handoff_block = Block::default()
-        .title("Recent Handoffs")
+        .title("Recent Activity")
         .borders(Borders::ALL);
     frame.render_widget(
         ratatui::widgets::Paragraph::new(handoff_text).block(handoff_block),
         chunks[2],
     );
 
-    // Footer
     let footer = Block::default()
-        .title(" q: quit | h: manual handoff | r: refresh ")
+        .title(" q: quit | tab: timeline | auto-refresh: 500ms ")
         .borders(Borders::TOP);
     frame.render_widget(footer, chunks[3]);
 }

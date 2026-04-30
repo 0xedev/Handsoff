@@ -466,7 +466,7 @@ async fn cmd_doctor() -> Result<()> {
 // --- core ---------------------------------------------------------------
 
 async fn cmd_init(path: PathBuf) -> Result<()> {
-    let root = if path.as_os_str().is_empty() || path == PathBuf::from(".") {
+    let root = if path.as_os_str().is_empty() || path.as_path() == Path::new(".") {
         std::env::current_dir()?.canonicalize()?
     } else {
         path.canonicalize().context("resolving project path")?
@@ -483,14 +483,18 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
         println!("{} {label}", if *ok { "✓" } else { "⚠" });
     }
 
-    let threshold = prompt_u32("Switch agents when usage reaches", 15)?;
+    let threshold = prompt_threshold()?;
     let chain_default = detected_chain(&detected);
-    let chain_input = prompt_text("Failover chain", &chain_default.join(" -> "))?;
-    let chain = parse_chain(&chain_input, &chain_default);
-    let worker = prompt_text("Worker agent", "claude")?;
-    let critic = prompt_text("Lead critic", "claude")?;
-    let passing_score = prompt_u32("Require critic score before completion", 8)?;
-    let start_background = prompt_yes_no("Start Handsoff in background", true)?;
+    let chain = prompt_chain(&chain_default)?;
+    let worker_choices = supported_critic_agents(&detected);
+    let worker = prompt_agent_choice("Worker agent", &worker_choices, "claude")?;
+    let critic = prompt_agent_choice("Lead critic", &worker_choices, "claude")?;
+    let passing_score = prompt_score()?;
+    let start_background = prompt_yes_no("Start Handsoff background services", true)?;
+    let open_dashboard = start_background
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && prompt_yes_no("Open live dashboard after setup", true)?;
 
     let config_path = handoff_cli::setup::write_init_config(
         &root,
@@ -539,17 +543,21 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
 
     println!("project_id={project_id}");
     println!("setup root: {}", handoff_dir.display());
+    if open_dashboard {
+        println!("opening live dashboard; press q to exit");
+        return handoff_cli::tui::run(&daemon_base_url()).await;
+    }
     Ok(())
 }
 
 fn print_init_banner() {
     let stdout_is_tty = io::stdout().is_terminal();
     let lines = [
-        " _   _                 __            __             ",
-        "| | | | ___  _ __ ___ / _| ___  ___ / _| ___  _ __  ",
-        "| |_| |/ _ \\| '__/ _ \\ |_ / _ \\/ __| |_ / _ \\| '__| ",
-        "|  _  | (_) | | |  __/  _|  __/ (__|  _| (_) | |    ",
-        "|_| |_|\\___/|_|  \\___|_|  \\___|\\___|_|  \\___/|_|    ",
+        " _   _    _    _   _ ____   ___  _____ _____ ",
+        "| | | |  / \\  | \\ | |  _ \\ / _ \\|  ___|  ___|",
+        "| |_| | / _ \\ |  \\| | | | | | | | |_  | |_   ",
+        "|  _  |/ ___ \\| |\\  | |_| | |_| |  _| |  _|  ",
+        "|_| |_/_/   \\_\\_| \\_|____/ \\___/|_|   |_|    ",
     ];
 
     println!();
@@ -602,22 +610,160 @@ fn detected_chain(detected: &[(String, bool)]) -> Vec<String> {
     }
 }
 
-fn prompt_text(label: &str, default: &str) -> Result<String> {
-    print!("{label}? [{default}] ");
+fn supported_critic_agents(detected: &[(String, bool)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (label, ok) in detected {
+        if !ok {
+            continue;
+        }
+        match label.as_str() {
+            "Claude Code" => out.push("claude".into()),
+            "Codex" => out.push("codex".into()),
+            "GitHub Copilot" => out.push("copilot".into()),
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        vec!["claude".into(), "codex".into(), "copilot".into()]
+    } else {
+        out
+    }
+}
+
+fn prompt_threshold() -> Result<u32> {
+    let value = prompt_numbered(
+        "Switch when remaining budget falls below",
+        &[
+            (
+                "10",
+                "10% remaining",
+                "use most of the current agent before switching",
+            ),
+            ("15", "15% remaining", "balanced default"),
+            ("20", "20% remaining", "switch earlier"),
+        ],
+        1,
+    )?;
+    Ok(value.parse().unwrap_or(15))
+}
+
+fn prompt_score() -> Result<u32> {
+    let value = prompt_numbered(
+        "Required critic score before completion",
+        &[
+            ("7", "7/10", "faster acceptance"),
+            ("8", "8/10", "balanced default"),
+            ("9", "9/10", "stricter review"),
+            ("10", "10/10", "only accept near-perfect work"),
+        ],
+        1,
+    )?;
+    Ok(value.parse().unwrap_or(8))
+}
+
+fn prompt_agent_choice(label: &str, choices: &[String], default: &str) -> Result<String> {
+    let rendered = choices
+        .iter()
+        .map(|agent| {
+            let name = match agent.as_str() {
+                "claude" => "Claude Code",
+                "codex" => "Codex CLI",
+                "copilot" => "GitHub Copilot",
+                other => other,
+            };
+            (agent.as_str(), name, "local authenticated CLI")
+        })
+        .collect::<Vec<_>>();
+    let default_idx = choices.iter().position(|c| c == default).unwrap_or(0);
+    prompt_numbered(label, &rendered, default_idx)
+}
+
+fn prompt_numbered(
+    label: &str,
+    choices: &[(&str, &str, &str)],
+    default_idx: usize,
+) -> Result<String> {
+    println!();
+    println!("{label}:");
+    for (idx, (_, name, detail)) in choices.iter().enumerate() {
+        println!("  {}. {:<18} {}", idx + 1, name, detail);
+    }
+    print!("Select [{}]: ", default_idx + 1);
     io::stdout().flush()?;
+
     let mut buf = String::new();
     io::stdin().read_line(&mut buf)?;
     let trimmed = buf.trim();
-    Ok(if trimmed.is_empty() {
-        default.to_string()
-    } else {
-        trimmed.to_string()
-    })
+    if trimmed.is_empty() {
+        return Ok(choices[default_idx].0.to_string());
+    }
+    if let Ok(n) = trimmed.parse::<usize>() {
+        if let Some(choice) = choices.get(n.saturating_sub(1)) {
+            return Ok(choice.0.to_string());
+        }
+    }
+    for (value, name, _) in choices {
+        if trimmed.eq_ignore_ascii_case(value) || trimmed.eq_ignore_ascii_case(name) {
+            return Ok((*value).to_string());
+        }
+    }
+    Ok(choices[default_idx].0.to_string())
 }
 
-fn prompt_u32(label: &str, default: u32) -> Result<u32> {
-    let input = prompt_text(label, &default.to_string())?;
-    Ok(input.parse().unwrap_or(default))
+fn prompt_chain(default: &[String]) -> Result<Vec<String>> {
+    println!();
+    println!("Failover chain:");
+    for (idx, agent) in default.iter().enumerate() {
+        println!("  {}. {}", idx + 1, display_agent(agent));
+    }
+    let default_order = (1..=default.len())
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    print!("Select order [{}]: ", default_order);
+    io::stdout().flush()?;
+
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf)?;
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        return Ok(default.to_vec());
+    }
+
+    let mut out = Vec::new();
+    for token in trimmed
+        .replace("->", ",")
+        .replace(['>', ' '], ",")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let parsed = if let Ok(n) = token.parse::<usize>() {
+            default.get(n.saturating_sub(1)).cloned()
+        } else {
+            AgentKind::parse(token).map(|k| k.as_str().to_string())
+        };
+        if let Some(agent) = parsed {
+            if !out.contains(&agent) {
+                out.push(agent);
+            }
+        }
+    }
+    if out.is_empty() {
+        Ok(default.to_vec())
+    } else {
+        Ok(out)
+    }
+}
+
+fn display_agent(agent: &str) -> &str {
+    match agent {
+        "claude" => "Claude Code",
+        "codex" => "Codex CLI",
+        "copilot" => "GitHub Copilot",
+        "cursor" => "Cursor / Antigravity",
+        other => other,
+    }
 }
 
 fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
@@ -633,20 +779,6 @@ fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
         "n" | "no" => false,
         _ => default,
     })
-}
-
-fn parse_chain(input: &str, default: &[String]) -> Vec<String> {
-    let cleaned: Vec<String> = input
-        .split(&['→', ',', '-', '>'][..])
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| AgentKind::parse(s).map(|k| k.as_str().to_string()))
-        .collect();
-    if cleaned.is_empty() {
-        default.to_vec()
-    } else {
-        cleaned
-    }
 }
 
 fn cmd_sync(path: PathBuf) -> Result<()> {
@@ -1297,12 +1429,16 @@ async fn wait_for_daemon_ready() -> Result<()> {
 }
 
 fn daemon_health_url() -> String {
-    let rpc = std::env::var("HANDOFF_DAEMON_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7879/rpc".to_string());
+    format!("{}/health", daemon_base_url())
+}
+
+fn daemon_base_url() -> String {
+    let rpc =
+        std::env::var("HANDOFF_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
     if let Some(base) = rpc.strip_suffix("/rpc") {
-        format!("{base}/health")
+        base.to_string()
     } else {
-        format!("{rpc}/health")
+        rpc
     }
 }
 
