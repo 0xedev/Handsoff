@@ -40,10 +40,10 @@ async fn event_loop(
     loop {
         match view {
             View::Agents => {
-                let agents = agents::fetch(daemon_url).await.unwrap_or_default();
+                let data = agents::fetch(daemon_url).await.unwrap_or_default();
                 let handoffs = events::fetch_handoffs(daemon_url).await.unwrap_or_default();
                 terminal.draw(|frame| {
-                    agents::render(frame, &agents, &handoffs);
+                    agents::render(frame, &data, &handoffs);
                 })?;
             }
             View::Timeline => {
