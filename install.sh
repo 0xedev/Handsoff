@@ -68,8 +68,9 @@ if curl -fsSfL "$URL" -o "$TMP_DIR/handoff-install"; then
     sudo mv "$TMP_DIR/handoff-install" "${BIN_DIR}/handoff"
     echo "Installed handoff release ${TAG} to ${BIN_DIR}/handoff"
 else
-    echo "Release binary not available yet for ${TAG}; building from source..." >&2
-    SRC_URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+    SOURCE_REF="${HANDOFF_SOURCE_REF:-main}"
+    echo "Release binary not available yet for ${TAG}; building from ${SOURCE_REF}..." >&2
+    SRC_URL="https://github.com/${REPO}/archive/refs/heads/${SOURCE_REF}.tar.gz"
     curl -fsSL "$SRC_URL" -o "$TMP_DIR/handoff-src.tar.gz"
     tar -xzf "$TMP_DIR/handoff-src.tar.gz" -C "$TMP_DIR"
     SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d | grep -E '/[Hh]andsoff-' | head -n 1)"
@@ -80,7 +81,7 @@ else
     cargo build --locked --release --bin handoff --manifest-path "$SRC_DIR/rust/crates/cli/Cargo.toml"
     chmod +x "$SRC_DIR/rust/target/release/handoff"
     sudo mv "$SRC_DIR/rust/target/release/handoff" "${BIN_DIR}/handoff"
-    echo "Installed handoff from source tag ${TAG} to ${BIN_DIR}/handoff"
+    echo "Installed handoff from source ${SOURCE_REF} to ${BIN_DIR}/handoff"
 fi
 
 echo "Run: handoff init"
