@@ -142,3 +142,14 @@ cargo test --workspace
 ```
 
 Linux and macOS are supported. Windows is not a first-class target.
+
+## Maintainer Release
+
+If GitHub Actions is unavailable, publish a release binary from a local machine:
+
+```bash
+gh auth login
+scripts/release-local.sh v0.4.1-alpha.2
+```
+
+That builds the current platform binary, writes a `.sha256` checksum, and uploads both files to the GitHub Release. The installer will pick up the latest release automatically.

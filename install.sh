@@ -43,9 +43,23 @@ verify_sha256() {
     echo "  ✓ Checksum verified"
 }
 
+latest_release_tag() {
+    curl -sSfL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
+        | head -n 1
+}
+
+latest_git_tag() {
+    curl -sSfL "https://api.github.com/repos/${REPO}/tags?per_page=1" 2>/dev/null \
+        | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' \
+        | head -n 1
+}
+
 ARTIFACT="$(detect_target)"
-TAG="$(curl -sSfL "https://api.github.com/repos/${REPO}/tags?per_page=1" \
-    | grep '"name"' | head -n 1 | cut -d'"' -f4)"
+TAG="$(latest_release_tag)"
+if [ -z "$TAG" ]; then
+    TAG="$(latest_git_tag)"
+fi
 
 if [ -z "$TAG" ]; then
     echo "Could not determine latest tag" >&2
