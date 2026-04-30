@@ -195,11 +195,11 @@ enum CriticCmd {
         #[arg(long, default_value = ".")]
         project: PathBuf,
         /// Local agent for the worker role (claude | codex | copilot).
-        #[arg(long, default_value = handoff_critic::DEFAULT_WORKER_AGENT)]
-        worker: String,
+        #[arg(long)]
+        worker: Option<String>,
         /// Local agent for the critic role.
-        #[arg(long, default_value = handoff_critic::DEFAULT_CRITIC_AGENT)]
-        critic: String,
+        #[arg(long)]
+        critic: Option<String>,
         #[arg(long)]
         no_proxy: bool,
     },
@@ -208,10 +208,10 @@ enum CriticCmd {
         task: String,
         #[arg(long, default_value = ".")]
         project: PathBuf,
-        #[arg(long, default_value = handoff_critic::DEFAULT_WORKER_AGENT)]
-        worker: String,
-        #[arg(long, default_value = handoff_critic::DEFAULT_CRITIC_AGENT)]
-        critic: String,
+        #[arg(long)]
+        worker: Option<String>,
+        #[arg(long)]
+        critic: Option<String>,
         #[arg(long, default_value_t = 2.0)]
         interval: f64,
         #[arg(long, default_value_t = 3.0)]
@@ -488,7 +488,9 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
     let chain = prompt_chain(&chain_default)?;
     let worker_choices = supported_critic_agents(&detected);
     let worker = prompt_agent_choice("Worker agent", &worker_choices, "claude")?;
+    let worker_model = prompt_model_choice("Worker model", &worker)?;
     let critic = prompt_agent_choice("Lead critic", &worker_choices, "claude")?;
+    let critic_model = prompt_model_choice("Lead critic model", &critic)?;
     let passing_score = prompt_score()?;
     let start_background = prompt_yes_no("Start Handsoff background services", true)?;
     let open_dashboard = start_background
@@ -498,11 +500,15 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
 
     let config_path = handoff_cli::setup::write_init_config(
         &root,
-        threshold,
-        &chain,
-        &worker,
-        &critic,
-        passing_score,
+        handoff_cli::setup::InitConfigOptions {
+            threshold_percent: threshold,
+            chain: &chain,
+            worker_agent: &worker,
+            worker_model: worker_model.as_deref(),
+            critic_agent: &critic,
+            critic_model: critic_model.as_deref(),
+            passing_score,
+        },
     )?;
     println!("wrote {}", config_path.display());
 
@@ -676,6 +682,26 @@ fn prompt_agent_choice(label: &str, choices: &[String], default: &str) -> Result
         .collect::<Vec<_>>();
     let default_idx = choices.iter().position(|c| c == default).unwrap_or(0);
     prompt_numbered(label, &rendered, default_idx)
+}
+
+fn prompt_model_choice(label: &str, agent: &str) -> Result<Option<String>> {
+    let choices = match agent {
+        "claude" => vec![
+            ("", "Default", "use the user's Claude Code default"),
+            ("haiku", "Claude Haiku", "cheaper worker-style model"),
+            ("sonnet", "Claude Sonnet", "balanced model"),
+            ("opus", "Claude Opus", "strongest reviewer-style model"),
+        ],
+        "codex" => vec![
+            ("", "Default", "use the user's Codex default"),
+            ("gpt-5.4-mini", "GPT-5.4 Mini", "cheaper worker-style model"),
+            ("gpt-5.4", "GPT-5.4", "balanced model"),
+            ("gpt-5.5", "GPT-5.5", "strongest reviewer-style model"),
+        ],
+        _ => vec![("", "Default", "no model selector for this CLI")],
+    };
+    let selected = prompt_numbered(label, &choices, 0)?;
+    Ok((!selected.is_empty()).then_some(selected))
 }
 
 fn prompt_numbered(
@@ -1089,13 +1115,15 @@ async fn cmd_brain_append(text: String, project: PathBuf) -> Result<()> {
 async fn cmd_critic_run(
     task: &str,
     project: PathBuf,
-    worker: String,
-    critic: String,
+    worker: Option<String>,
+    critic: Option<String>,
     no_proxy: bool,
 ) -> Result<()> {
     let root = project.canonicalize()?;
     let project_id = rpc_register_project(&root).await.ok();
     let policy = handoff_policy::load(&root).unwrap_or_default();
+    let worker = worker.unwrap_or(policy.critic.worker_agent.clone());
+    let critic = critic.unwrap_or(policy.critic.critic_agent.clone());
     let mut runner = handoff_critic::CriticRunner::new(&root)?
         .with_agents(worker.clone(), critic.clone())
         .with_proxy(if no_proxy { None } else { Some(proxy_url()) });
@@ -1124,17 +1152,21 @@ async fn cmd_critic_run(
 async fn cmd_critic_watch(
     task: String,
     project: PathBuf,
-    worker: String,
-    critic: String,
+    worker: Option<String>,
+    critic: Option<String>,
     interval: f64,
     debounce: f64,
     no_proxy: bool,
 ) -> Result<()> {
     let root = project.canonicalize()?;
     let project_id = rpc_register_project(&root).await.ok();
-    let runner = handoff_critic::CriticRunner::new(&root)?
+    let policy = handoff_policy::load(&root).unwrap_or_default();
+    let worker = worker.unwrap_or(policy.critic.worker_agent.clone());
+    let critic = critic.unwrap_or(policy.critic.critic_agent.clone());
+    let mut runner = handoff_critic::CriticRunner::new(&root)?
         .with_agents(worker.clone(), critic.clone())
         .with_proxy(if no_proxy { None } else { Some(proxy_url()) });
+    runner.max_rounds = Some(policy.critic.max_rounds);
     let mut watch = handoff_critic::watch::WatchLoop::new(&root, interval, debounce);
     println!("watching {} (Ctrl-C to stop)", root.display());
     let interval_dur = Duration::from_secs_f64(interval.max(0.05));

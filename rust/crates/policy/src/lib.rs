@@ -14,6 +14,7 @@ pub struct Policy {
     #[serde(default)]
     pub failover: FailoverPolicy,
     #[serde(default)]
+    #[serde(alias = "review")]
     pub critic: CriticPolicy,
     #[serde(default)]
     pub memory: MemoryPolicy,
@@ -49,16 +50,15 @@ pub struct FailoverPolicy {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CriticPolicy {
     /// Local agent that drives the worker role (e.g. "claude", "codex").
-    /// Aliased to `worker_model` for back-compat with v0.4.0-alpha configs.
-    #[serde(default = "default_worker", alias = "worker_model")]
+    #[serde(default = "default_worker")]
     pub worker_agent: String,
+    #[serde(default)]
+    pub worker_model: Option<String>,
     /// Local agent that drives the critic role.
-    #[serde(
-        default = "default_critic",
-        alias = "critic_model",
-        alias = "lead_agent"
-    )]
+    #[serde(default = "default_critic", alias = "lead_agent")]
     pub critic_agent: String,
+    #[serde(default, alias = "lead_model")]
+    pub critic_model: Option<String>,
     /// Local agent used for failover-snapshot summarisation.
     #[serde(default = "default_critic", alias = "summarizer_model")]
     pub summarizer_agent: String,
@@ -124,7 +124,9 @@ impl Default for CriticPolicy {
     fn default() -> Self {
         Self {
             worker_agent: default_worker(),
+            worker_model: None,
             critic_agent: default_critic(),
+            critic_model: None,
             summarizer_agent: default_critic(),
             passing_score: default_score(),
             max_rounds: default_max_rounds(),
@@ -147,8 +149,27 @@ pub fn load(project_root: &Path) -> Result<Policy> {
         return Ok(Policy::default());
     }
     let body = std::fs::read_to_string(&p)?;
-    let policy: Policy = toml::from_str(&body)?;
+    let mut policy: Policy = toml::from_str(&body)?;
+    policy.critic.normalize_specs();
     Ok(policy)
+}
+
+impl CriticPolicy {
+    fn normalize_specs(&mut self) {
+        if let Some(model) = self.worker_model.take() {
+            if !self.worker_agent.contains(':') {
+                self.worker_agent = format!("{}:{model}", self.worker_agent);
+            }
+        }
+        if let Some(model) = self.critic_model.take() {
+            if !self.critic_agent.contains(':') {
+                self.critic_agent = format!("{}:{model}", self.critic_agent);
+            }
+        }
+        if self.summarizer_agent == default_critic() {
+            self.summarizer_agent = self.critic_agent.clone();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,5 +296,27 @@ mod tests {
     fn pick_next_first_when_unknown() {
         let chain = vec!["claude".to_string(), "codex".into()];
         assert_eq!(pick_next(&chain, "antigravity", &[]), Some("claude"));
+    }
+
+    #[test]
+    fn review_config_combines_agent_and_model_specs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".handoff");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            r#"[review]
+worker_agent = "claude"
+worker_model = "haiku"
+lead_agent = "codex"
+lead_model = "gpt-5.5"
+"#,
+        )
+        .unwrap();
+
+        let policy = load(tmp.path()).unwrap();
+        assert_eq!(policy.critic.worker_agent, "claude:haiku");
+        assert_eq!(policy.critic.critic_agent, "codex:gpt-5.5");
+        assert_eq!(policy.critic.summarizer_agent, "codex:gpt-5.5");
     }
 }

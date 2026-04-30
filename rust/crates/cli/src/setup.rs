@@ -79,21 +79,33 @@ pub async fn run_setup(path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub struct InitConfigOptions<'a> {
+    pub threshold_percent: u32,
+    pub chain: &'a [String],
+    pub worker_agent: &'a str,
+    pub worker_model: Option<&'a str>,
+    pub critic_agent: &'a str,
+    pub critic_model: Option<&'a str>,
+    pub passing_score: u32,
+}
+
 /// Write the initial project config in the newer handsoff shape.
-pub fn write_init_config(
-    root: &Path,
-    threshold_percent: u32,
-    chain: &[String],
-    worker_agent: &str,
-    critic_agent: &str,
-    passing_score: u32,
-) -> Result<PathBuf> {
+pub fn write_init_config(root: &Path, options: InitConfigOptions<'_>) -> Result<PathBuf> {
     let config_path = handoff_common::project_dir(root).join("config.toml");
-    let chain_str = chain
+    let chain_str = options
+        .chain
         .iter()
         .map(|s| format!("\"{s}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let worker_model_line = options
+        .worker_model
+        .map(|model| format!("worker_model = \"{model}\"\n"))
+        .unwrap_or_default();
+    let critic_model_line = options
+        .critic_model
+        .map(|model| format!("lead_model = \"{model}\"\n"))
+        .unwrap_or_default();
     let body = format!(
         r#"[failover]
 threshold_percent = {threshold}
@@ -103,19 +115,21 @@ summarize = true
 
 [review]
 worker_agent = "{worker}"
-lead_agent = "{critic}"
-passing_score = {score}
+{worker_model_line}lead_agent = "{critic}"
+{critic_model_line}passing_score = {score}
 max_rounds = 3
 
 [memory]
 mode = "unified"
 auto_snapshot = true
 "#,
-        threshold = threshold_percent,
+        threshold = options.threshold_percent,
         chain = chain_str,
-        worker = worker_agent,
-        critic = critic_agent,
-        score = passing_score,
+        worker = options.worker_agent,
+        worker_model_line = worker_model_line,
+        critic = options.critic_agent,
+        critic_model_line = critic_model_line,
+        score = options.passing_score,
     );
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;

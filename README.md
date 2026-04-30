@@ -96,8 +96,10 @@ auto_switch = true
 summarize = true
 
 [review]
-worker_agent = "claude-haiku"
-lead_agent = "claude-opus"
+worker_agent = "claude"
+worker_model = "haiku"
+lead_agent = "claude"
+lead_model = "opus"
 passing_score = 8
 max_rounds = 3
 

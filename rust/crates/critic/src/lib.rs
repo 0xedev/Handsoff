@@ -31,6 +31,30 @@ pub const SUMMARIZER_SYSTEM: &str = include_str!("summarizer_system.txt");
 pub const DEFAULT_WORKER_AGENT: &str = "claude";
 pub const DEFAULT_CRITIC_AGENT: &str = "claude";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentSpec {
+    kind: String,
+    model: Option<String>,
+}
+
+impl AgentSpec {
+    fn parse(input: &str) -> Self {
+        let trimmed = input.trim();
+        if let Some((kind, model)) = trimmed.split_once(':') {
+            let model = model.trim();
+            Self {
+                kind: kind.trim().to_ascii_lowercase(),
+                model: (!model.is_empty()).then(|| model.to_string()),
+            }
+        } else {
+            Self {
+                kind: trimmed.to_ascii_lowercase(),
+                model: None,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CriticResult {
     pub verdict: String,
@@ -116,9 +140,10 @@ impl CriticRunner {
                 .ok_or_else(|| anyhow!("ran out of fake responses"));
         }
 
-        let argv = headless_argv(agent).ok_or_else(|| anyhow!("unsupported agent: {agent}"))?;
+        let spec = AgentSpec::parse(agent);
+        let argv = headless_argv(&spec).ok_or_else(|| anyhow!("unsupported agent: {agent}"))?;
         let prompt = format!("{system}\n\n---\n\n{user}");
-        let mut cmd = Command::new(argv[0]);
+        let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
             .arg(&prompt)
             .current_dir(&self.project_root)
@@ -310,13 +335,26 @@ impl CriticRunner {
 
 /// Headless invocation per agent kind. Tail of argv is the prompt, which
 /// is appended at call time.
-fn headless_argv(kind: &str) -> Option<&'static [&'static str]> {
-    match kind {
-        "claude" => Some(&["claude", "-p"]),
-        "codex" => Some(&["codex", "exec"]),
-        "copilot" => Some(&["gh", "copilot", "suggest"]),
-        _ => None,
+fn headless_argv(spec: &AgentSpec) -> Option<Vec<String>> {
+    let mut argv = match spec.kind.as_str() {
+        "claude" => vec!["claude".into()],
+        "codex" => vec!["codex".into(), "exec".into()],
+        "copilot" => vec!["gh".into(), "copilot".into(), "suggest".into()],
+        _ => return None,
+    };
+    if let Some(model) = &spec.model {
+        match spec.kind.as_str() {
+            "claude" | "codex" => {
+                argv.push("--model".into());
+                argv.push(model.clone());
+            }
+            _ => {}
+        }
     }
+    if spec.kind == "claude" {
+        argv.push("-p".into());
+    }
+    Some(argv)
 }
 
 fn make_critic_prompt(task: &str, plan: &str, diff: &str) -> String {
@@ -409,10 +447,26 @@ mod tests {
 
     #[test]
     fn headless_argv_knows_supported_agents() {
-        assert!(headless_argv("claude").is_some());
-        assert!(headless_argv("codex").is_some());
-        assert!(headless_argv("copilot").is_some());
-        assert!(headless_argv("cursor").is_none());
+        assert!(headless_argv(&AgentSpec::parse("claude")).is_some());
+        assert!(headless_argv(&AgentSpec::parse("codex")).is_some());
+        assert!(headless_argv(&AgentSpec::parse("copilot")).is_some());
+        assert!(headless_argv(&AgentSpec::parse("cursor")).is_none());
+    }
+
+    #[test]
+    fn headless_argv_applies_supported_model_flags() {
+        assert_eq!(
+            headless_argv(&AgentSpec::parse("claude:haiku")).unwrap(),
+            vec!["claude", "--model", "haiku", "-p"]
+        );
+        assert_eq!(
+            headless_argv(&AgentSpec::parse("codex:gpt-5.4")).unwrap(),
+            vec!["codex", "exec", "--model", "gpt-5.4"]
+        );
+        assert_eq!(
+            headless_argv(&AgentSpec::parse("copilot:anything")).unwrap(),
+            vec!["gh", "copilot", "suggest"]
+        );
     }
 
     #[tokio::test]
