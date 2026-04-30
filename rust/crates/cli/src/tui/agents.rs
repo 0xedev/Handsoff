@@ -10,6 +10,17 @@ use std::collections::{HashMap, HashSet};
 use handoff_adapters::{all as all_adapters, ProcInfo};
 use handoff_common::{daemon_pidfile, proxy_pidfile};
 
+#[derive(Default, Clone)]
+struct KindUsage {
+    tokens_remaining: Option<i64>,
+    requests_remaining: Option<i64>,
+    tokens_reset_at: Option<i64>,
+    last_sample_ts: Option<i64>,
+    total_requests: i64,
+    rate_limited_count: i64,
+    last_429_at: Option<i64>,
+}
+
 #[derive(Deserialize, Default, Clone)]
 pub struct AgentSummary {
     pub id: i64,
@@ -103,6 +114,7 @@ fn prepare_dashboard_data(
         .iter()
         .filter(|a| a.last_sample_ts.is_some())
         .count();
+    let usage_by_kind = latest_usage_by_kind(raw_agents);
     let mut stale_count = 0;
     let mut hidden_internal_count = 0;
     let mut discovered_count = 0;
@@ -146,7 +158,7 @@ fn prepare_dashboard_data(
 
             visible_pids.insert(detected.pid);
             discovered_count += 1;
-            agents.push(AgentSummary {
+            let mut agent = AgentSummary {
                 id: 0,
                 kind: adapter.kind().as_str().to_string(),
                 pid: Some(detected.pid),
@@ -154,7 +166,11 @@ fn prepare_dashboard_data(
                 spawned_by: "process".into(),
                 pid_alive: true,
                 ..Default::default()
-            });
+            };
+            if let Some(usage) = usage_by_kind.get(&agent.kind) {
+                apply_kind_usage(&mut agent, usage);
+            }
+            agents.push(agent);
         }
     }
 
@@ -167,6 +183,48 @@ fn prepare_dashboard_data(
         tracked_requests_seen,
         tracked_429s_seen,
         tracked_sampled_agents,
+    }
+}
+
+fn latest_usage_by_kind(agents: &[AgentSummary]) -> HashMap<String, KindUsage> {
+    let mut usage = HashMap::<String, KindUsage>::new();
+    for agent in agents {
+        let entry = usage.entry(agent.kind.clone()).or_default();
+        entry.total_requests += agent.total_requests;
+        entry.rate_limited_count += agent.rate_limited_count;
+        entry.last_429_at = latest_ts(entry.last_429_at, agent.last_429_at);
+
+        let is_newer_sample = match (agent.last_sample_ts, entry.last_sample_ts) {
+            (Some(a), Some(b)) => a > b,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if is_newer_sample {
+            entry.tokens_remaining = agent.tokens_remaining;
+            entry.requests_remaining = agent.requests_remaining;
+            entry.tokens_reset_at = agent.tokens_reset_at;
+            entry.last_sample_ts = agent.last_sample_ts;
+        }
+    }
+    usage
+}
+
+fn apply_kind_usage(agent: &mut AgentSummary, usage: &KindUsage) {
+    agent.tokens_remaining = usage.tokens_remaining;
+    agent.requests_remaining = usage.requests_remaining;
+    agent.tokens_reset_at = usage.tokens_reset_at;
+    agent.last_sample_ts = usage.last_sample_ts;
+    agent.total_requests = usage.total_requests;
+    agent.rate_limited_count = usage.rate_limited_count;
+    agent.last_429_at = usage.last_429_at;
+}
+
+fn latest_ts(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -411,6 +469,30 @@ mod tests {
         assert_eq!(data.agents[0].kind, "claude");
         assert_eq!(data.agents[0].status, "detected");
         assert_eq!(data.discovered_count, 1);
+    }
+
+    #[test]
+    fn dashboard_applies_kind_usage_to_discovered_agents() {
+        let procs = vec![proc(10, "claude", &["/usr/local/bin/claude"])];
+        let mut agents = vec![AgentSummary {
+            id: 2,
+            kind: "claude".into(),
+            pid: Some(99),
+            status: "running".into(),
+            tokens_remaining: Some(1200),
+            requests_remaining: Some(44),
+            last_sample_ts: Some(100),
+            total_requests: 3,
+            ..Default::default()
+        }];
+
+        let data = prepare_dashboard_data(&mut agents, &procs, &HashSet::new());
+        assert_eq!(data.agents.len(), 1);
+        assert_eq!(data.agents[0].pid, Some(10));
+        assert_eq!(data.agents[0].tokens_remaining, Some(1200));
+        assert_eq!(data.agents[0].requests_remaining, Some(44));
+        assert_eq!(data.agents[0].last_sample_ts, Some(100));
+        assert_eq!(data.agents[0].total_requests, 3);
     }
 
     #[test]
