@@ -407,6 +407,7 @@ fn rpc_list_agents(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Va
                 "requests_remaining": a.requests_remaining,
                 "tokens_reset_at": a.tokens_reset_at,
                 "last_sample_ts": a.last_sample_ts,
+                "raw_headers": parse_raw_headers(a.raw_headers.as_deref()),
                 "total_requests": a.total_requests,
                 "rate_limited_count": a.rate_limited_count,
                 "last_429_at": a.last_429_at,
@@ -414,6 +415,10 @@ fn rpc_list_agents(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Va
         })
         .collect();
     Ok(json!({ "agents": agents }))
+}
+
+fn parse_raw_headers(raw: Option<&str>) -> Option<serde_json::Value> {
+    raw.and_then(|body| serde_json::from_str(body).ok())
 }
 
 fn rpc_stop_agent(s: &AppState, p: &serde_json::Value) -> Result<serde_json::Value> {

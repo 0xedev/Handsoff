@@ -196,7 +196,7 @@ impl Adapter for CodexAdapter {
         &["codex"]
     }
     fn api_hosts(&self) -> &'static [&'static str] {
-        &["api.openai.com"]
+        &["api.openai.com", "chatgpt.com"]
     }
     fn context_files(&self, root: &Path) -> Vec<PathBuf> {
         vec![root.join("AGENTS.md")]
@@ -542,6 +542,7 @@ mod tests {
         assert!(ClaudeAdapter.classify_host("api.anthropic.com"));
         assert!(!ClaudeAdapter.classify_host("api.openai.com"));
         assert!(CodexAdapter.classify_host("api.openai.com"));
+        assert!(CodexAdapter.classify_host("chatgpt.com"));
     }
 
     #[test]

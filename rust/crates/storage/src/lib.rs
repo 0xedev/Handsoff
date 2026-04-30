@@ -109,6 +109,7 @@ pub struct AgentSummary {
     pub requests_remaining: Option<i64>,
     pub tokens_reset_at: Option<i64>,
     pub last_sample_ts: Option<i64>,
+    pub raw_headers: Option<String>,
     pub total_requests: i64,
     pub rate_limited_count: i64,
     pub last_429_at: Option<i64>,
@@ -360,7 +361,7 @@ impl Database {
             };
             // latest sample
             if let Ok(latest) = conn.query_row(
-                "SELECT tokens_remaining, requests_remaining, tokens_reset_at, ts \
+                "SELECT tokens_remaining, requests_remaining, tokens_reset_at, ts, raw_headers \
                  FROM rate_samples WHERE agent_id = ?1 ORDER BY ts DESC LIMIT 1",
                 params![id],
                 |row| {
@@ -369,6 +370,7 @@ impl Database {
                         row.get::<_, Option<i64>>(1)?,
                         row.get::<_, Option<i64>>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             ) {
@@ -376,6 +378,7 @@ impl Database {
                 s.requests_remaining = latest.1;
                 s.tokens_reset_at = latest.2;
                 s.last_sample_ts = Some(latest.3);
+                s.raw_headers = latest.4;
             }
             // request counts
             if let Ok(counts) = conn.query_row(
@@ -452,7 +455,7 @@ impl Database {
         })?;
 
         if let Ok(latest) = conn.query_row(
-            "SELECT tokens_remaining, requests_remaining, tokens_reset_at, ts \
+            "SELECT tokens_remaining, requests_remaining, tokens_reset_at, ts, raw_headers \
              FROM rate_samples WHERE agent_id = ?1 ORDER BY ts DESC LIMIT 1",
             params![id],
             |row| {
@@ -461,6 +464,7 @@ impl Database {
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         ) {
@@ -468,6 +472,7 @@ impl Database {
             summary.requests_remaining = latest.1;
             summary.tokens_reset_at = latest.2;
             summary.last_sample_ts = Some(latest.3);
+            summary.raw_headers = latest.4;
         }
 
         if let Ok(counts) = conn.query_row(

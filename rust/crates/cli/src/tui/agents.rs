@@ -16,6 +16,7 @@ struct KindUsage {
     requests_remaining: Option<i64>,
     tokens_reset_at: Option<i64>,
     last_sample_ts: Option<i64>,
+    raw_headers: Option<serde_json::Value>,
     total_requests: i64,
     rate_limited_count: i64,
     last_429_at: Option<i64>,
@@ -37,6 +38,8 @@ pub struct AgentSummary {
     pub tokens_reset_at: Option<i64>,
     #[serde(default)]
     pub last_sample_ts: Option<i64>,
+    #[serde(default)]
+    pub raw_headers: Option<serde_json::Value>,
     #[serde(default)]
     pub total_requests: i64,
     #[serde(default)]
@@ -204,6 +207,7 @@ fn latest_usage_by_kind(agents: &[AgentSummary]) -> HashMap<String, KindUsage> {
             entry.requests_remaining = agent.requests_remaining;
             entry.tokens_reset_at = agent.tokens_reset_at;
             entry.last_sample_ts = agent.last_sample_ts;
+            entry.raw_headers = agent.raw_headers.clone();
         }
     }
     usage
@@ -214,6 +218,7 @@ fn apply_kind_usage(agent: &mut AgentSummary, usage: &KindUsage) {
     agent.requests_remaining = usage.requests_remaining;
     agent.tokens_reset_at = usage.tokens_reset_at;
     agent.last_sample_ts = usage.last_sample_ts;
+    agent.raw_headers = usage.raw_headers.clone();
     agent.total_requests = usage.total_requests;
     agent.rate_limited_count = usage.rate_limited_count;
     agent.last_429_at = usage.last_429_at;
@@ -384,7 +389,9 @@ fn budget_label(agent: &AgentSummary) -> String {
             Some(reset) => format!("{tokens} reset {}", format_epoch_delta(reset)),
             None => tokens.to_string(),
         },
-        None => "waiting".to_string(),
+        None => anthropic_remaining_label(agent, "7d")
+            .or_else(|| anthropic_remaining_label(agent, "unified"))
+            .unwrap_or_else(|| "waiting".to_string()),
     }
 }
 
@@ -392,7 +399,21 @@ fn request_budget_label(agent: &AgentSummary) -> String {
     agent
         .requests_remaining
         .map(|r| r.to_string())
+        .or_else(|| anthropic_remaining_label(agent, "5h"))
         .unwrap_or_else(|| "waiting".to_string())
+}
+
+fn anthropic_remaining_label(agent: &AgentSummary, window: &str) -> Option<String> {
+    let raw = agent.raw_headers.as_ref()?.as_object()?;
+    let key = match window {
+        "5h" => "anthropic-ratelimit-unified-5h-utilization",
+        "7d" => "anthropic-ratelimit-unified-7d-utilization",
+        "unified" => "anthropic-ratelimit-unified-utilization",
+        _ => return None,
+    };
+    let utilization = raw.get(key)?.as_str()?.parse::<f64>().ok()?;
+    let remaining = ((1.0 - utilization).clamp(0.0, 1.0) * 100.0).round() as i64;
+    Some(format!("{remaining}% left ({window})"))
 }
 
 fn last_seen_label(agent: &AgentSummary) -> String {
@@ -493,6 +514,21 @@ mod tests {
         assert_eq!(data.agents[0].requests_remaining, Some(44));
         assert_eq!(data.agents[0].last_sample_ts, Some(100));
         assert_eq!(data.agents[0].total_requests, 3);
+    }
+
+    #[test]
+    fn dashboard_formats_anthropic_unified_headers() {
+        let raw_headers = serde_json::json!({
+            "anthropic-ratelimit-unified-7d-utilization": "0.99",
+            "anthropic-ratelimit-unified-5h-utilization": "0.06"
+        });
+        let agent = AgentSummary {
+            raw_headers: Some(raw_headers),
+            ..Default::default()
+        };
+
+        assert_eq!(budget_label(&agent), "1% left (7d)");
+        assert_eq!(request_budget_label(&agent), "94% left (5h)");
     }
 
     #[test]
