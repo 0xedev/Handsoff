@@ -296,7 +296,7 @@ impl Adapter for CursorAdapter {
         AgentKind::Cursor
     }
     fn binaries(&self) -> &'static [&'static str] {
-        &["cursor", "antigravity", "Cursor", "Antigravity"]
+        &["cursor", "Cursor"]
     }
     fn api_hosts(&self) -> &'static [&'static str] {
         &[]
@@ -307,12 +307,15 @@ impl Adapter for CursorAdapter {
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
+        // Match by app bundle path in cmdline (Electron apps use generic binary names)
+        let app_markers: &[&str] = &["cursor.app"];
         let mut out = Vec::new();
         for p in procs {
             if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
                 continue;
             }
-            if p.name.to_ascii_lowercase().contains("helper") {
+            let lower_name = p.name.to_ascii_lowercase();
+            if lower_name.contains("helper") || lower_name.contains("crashpad") {
                 continue;
             }
             let head = p
@@ -322,7 +325,10 @@ impl Adapter for CursorAdapter {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if targets.contains(&head) || targets.contains(&p.name.to_ascii_lowercase()) {
+            let cmdline_joined = p.cmdline.join(" ").to_ascii_lowercase();
+            let by_name = targets.contains(&head) || targets.contains(&lower_name);
+            let by_app = app_markers.iter().any(|m| cmdline_joined.contains(m));
+            if by_name || by_app {
                 out.push(ProcessMatch {
                     pid: p.pid,
                     name: p.name.clone(),
@@ -345,10 +351,46 @@ impl Adapter for GeminiAdapter {
         AgentKind::Gemini
     }
     fn binaries(&self) -> &'static [&'static str] {
-        &["gemini"]
+        &["gemini", "language_server_macos_x64", "language_server_linux_x64"]
     }
     fn api_hosts(&self) -> &'static [&'static str] {
-        &["generativelanguage.googleapis.com"]
+        &["generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com"]
+    }
+    fn detect(&self, procs: &[ProcInfo]) -> Vec<ProcessMatch> {
+        let bins: Vec<String> = self
+            .binaries()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let app_markers: &[&str] = &["antigravity.app", "geminicodeassist"];
+        let mut out = Vec::new();
+        for p in procs {
+            if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
+                continue;
+            }
+            let lower_name = p.name.to_ascii_lowercase();
+            if lower_name.contains("helper") || lower_name.contains("crashpad") {
+                continue;
+            }
+            let head = p
+                .cmdline
+                .first()
+                .and_then(|arg| Path::new(arg).file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let cmdline_joined = p.cmdline.join(" ").to_ascii_lowercase();
+            let by_name = bins.contains(&head) || bins.contains(&lower_name);
+            let by_app = app_markers.iter().any(|m| cmdline_joined.contains(m));
+            if by_name || by_app {
+                out.push(ProcessMatch {
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    cmdline: p.cmdline.clone(),
+                });
+            }
+        }
+        out
     }
     fn context_files(&self, root: &Path) -> Vec<PathBuf> {
         vec![root.join("GEMINI.md")]
