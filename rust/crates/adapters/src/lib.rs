@@ -35,16 +35,22 @@ pub trait Adapter: Send + Sync {
             .collect();
         let mut out = Vec::new();
         for p in procs {
-            if p.cmdline.is_empty() {
-                continue;
-            }
-            let head = Path::new(&p.cmdline[0])
-                .file_name()
+            let head = p
+                .cmdline
+                .first()
+                .and_then(|arg| Path::new(arg).file_name())
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            let cmdline_match = p.cmdline.iter().any(|arg| {
+                Path::new(arg)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|name| bins.iter().any(|b| b == &name.to_ascii_lowercase()))
+                    .unwrap_or(false)
+            });
             let name = p.name.to_ascii_lowercase();
-            if bins.iter().any(|b| b == &head || b == &name) {
+            if bins.iter().any(|b| b == &head || b == &name) || cmdline_match {
                 out.push(ProcessMatch {
                     pid: p.pid,
                     name: p.name.clone(),
@@ -240,21 +246,21 @@ impl Adapter for CopilotAdapter {
     fn detect(&self, procs: &[ProcInfo]) -> Vec<ProcessMatch> {
         let mut out = Vec::new();
         for p in procs {
-            if p.cmdline.is_empty() {
-                continue;
-            }
-            let head = Path::new(&p.cmdline[0])
-                .file_name()
+            let head = p
+                .cmdline
+                .first()
+                .and_then(|arg| Path::new(arg).file_name())
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if head == "copilot" {
+            let name = p.name.to_ascii_lowercase();
+            if head == "copilot" || name == "copilot" {
                 out.push(ProcessMatch {
                     pid: p.pid,
                     name: "copilot".into(),
                     cmdline: p.cmdline.clone(),
                 });
-            } else if head == "gh"
+            } else if (head == "gh" || name == "gh")
                 && p.cmdline.len() > 1
                 && p.cmdline[1].eq_ignore_ascii_case("copilot")
             {
@@ -296,14 +302,16 @@ impl Adapter for CursorAdapter {
             .collect();
         let mut out = Vec::new();
         for p in procs {
-            if p.cmdline.is_empty() {
-                continue;
-            }
             if p.cmdline.iter().any(|a| a.starts_with("--type=")) {
                 continue;
             }
-            let head = Path::new(&p.cmdline[0])
-                .file_name()
+            if p.name.to_ascii_lowercase().contains("helper") {
+                continue;
+            }
+            let head = p
+                .cmdline
+                .first()
+                .and_then(|arg| Path::new(arg).file_name())
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
@@ -460,14 +468,44 @@ mod tests {
     }
 
     #[test]
+    fn default_detect_uses_process_name_when_cmdline_missing() {
+        let procs = vec![ProcInfo {
+            pid: 43,
+            name: "codex".into(),
+            cmdline: Vec::new(),
+        }];
+        let m = CodexAdapter.detect(&procs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].pid, 43);
+    }
+
+    #[test]
+    fn default_detect_scans_command_arguments() {
+        let procs = vec![proc(
+            44,
+            "node",
+            &["/usr/local/bin/node", "/usr/local/bin/claude", "--help"],
+        )];
+        let m = ClaudeAdapter.detect(&procs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].pid, 44);
+    }
+
+    #[test]
     fn copilot_requires_subcommand() {
         let procs = vec![
             proc(100, "gh", &["/usr/bin/gh", "issue", "list"]),
             proc(101, "gh", &["/usr/bin/gh", "copilot", "suggest"]),
+            ProcInfo {
+                pid: 102,
+                name: "copilot".into(),
+                cmdline: Vec::new(),
+            },
         ];
         let m = CopilotAdapter.detect(&procs);
-        assert_eq!(m.len(), 1);
+        assert_eq!(m.len(), 2);
         assert_eq!(m[0].pid, 101);
+        assert_eq!(m[1].pid, 102);
     }
 
     #[test]
@@ -486,11 +524,17 @@ mod tests {
                     "--type=renderer",
                 ],
             ),
+            ProcInfo {
+                pid: 202,
+                name: "Antigravity".into(),
+                cmdline: Vec::new(),
+            },
         ];
         let m = CursorAdapter.detect(&procs);
         let pids: Vec<i64> = m.iter().map(|x| x.pid).collect();
         assert!(pids.contains(&200));
         assert!(!pids.contains(&201));
+        assert!(pids.contains(&202));
     }
 
     #[test]

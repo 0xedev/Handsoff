@@ -7,11 +7,14 @@ use ratatui::{
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+use handoff_adapters::{all as all_adapters, ProcInfo};
+use handoff_common::{daemon_pidfile, proxy_pidfile};
+
 #[derive(Deserialize, Default, Clone)]
 pub struct AgentSummary {
     pub id: i64,
     pub kind: String,
-    pub pid: Option<i32>,
+    pub pid: Option<i64>,
     pub status: String,
     #[serde(default)]
     pub spawned_by: String,
@@ -40,23 +43,24 @@ pub struct DashboardData {
     pub agents: Vec<AgentSummary>,
     pub stale_count: usize,
     pub hidden_internal_count: usize,
+    pub discovered_count: usize,
     pub raw_count: usize,
+    pub tracked_requests_seen: i64,
+    pub tracked_429s_seen: i64,
+    pub tracked_sampled_agents: usize,
 }
 
 impl DashboardData {
     fn observed_requests(&self) -> i64 {
-        self.agents.iter().map(|a| a.total_requests).sum()
+        self.tracked_requests_seen
     }
 
     fn observed_429s(&self) -> i64 {
-        self.agents.iter().map(|a| a.rate_limited_count).sum()
+        self.tracked_429s_seen
     }
 
     fn sampled_agents(&self) -> usize {
-        self.agents
-            .iter()
-            .filter(|a| a.last_sample_ts.is_some())
-            .count()
+        self.tracked_sampled_agents
     }
 }
 
@@ -71,29 +75,48 @@ pub async fn fetch(daemon_url: &str) -> anyhow::Result<DashboardData> {
 
     let mut agents: Vec<AgentSummary> =
         serde_json::from_value(resp["result"]["agents"].clone()).unwrap_or_default();
-    Ok(prepare_dashboard_data(&mut agents))
+    let procs = handoff_adapters::snapshot_procs();
+    let service_pids = read_service_pids();
+    Ok(prepare_dashboard_data(&mut agents, &procs, &service_pids))
 }
 
-fn prepare_dashboard_data(raw_agents: &mut [AgentSummary]) -> DashboardData {
-    let procs = handoff_adapters::snapshot_procs();
+fn prepare_dashboard_data(
+    raw_agents: &mut [AgentSummary],
+    procs: &[ProcInfo],
+    service_pids: &HashSet<i64>,
+) -> DashboardData {
     let live_pids: HashSet<i64> = procs.iter().map(|p| p.pid).collect();
     let proc_cmds: HashMap<i64, String> = procs
         .iter()
-        .map(|p| (p.pid, p.cmdline.join(" ").to_ascii_lowercase()))
+        .map(|p| {
+            (
+                p.pid,
+                format!("{} {}", p.name, p.cmdline.join(" ")).to_ascii_lowercase(),
+            )
+        })
         .collect();
 
     let raw_count = raw_agents.len();
+    let tracked_requests_seen = raw_agents.iter().map(|a| a.total_requests).sum();
+    let tracked_429s_seen = raw_agents.iter().map(|a| a.rate_limited_count).sum();
+    let tracked_sampled_agents = raw_agents
+        .iter()
+        .filter(|a| a.last_sample_ts.is_some())
+        .count();
     let mut stale_count = 0;
     let mut hidden_internal_count = 0;
+    let mut discovered_count = 0;
     let mut agents = Vec::new();
+    let mut visible_pids = HashSet::new();
 
     for agent in raw_agents.iter_mut() {
-        let pid = agent.pid.map(i64::from);
+        let pid = agent.pid;
         agent.pid_alive = pid.map(|p| live_pids.contains(&p)).unwrap_or(false);
-        agent.internal_process = pid
-            .and_then(|p| proc_cmds.get(&p))
-            .map(|cmd| is_internal_handoff_cmd(cmd))
-            .unwrap_or(false);
+        agent.internal_process = pid.map(|p| service_pids.contains(&p)).unwrap_or(false)
+            || pid
+                .and_then(|p| proc_cmds.get(&p))
+                .map(|cmd| is_internal_handoff_cmd(cmd))
+                .unwrap_or(false);
 
         if agent.internal_process {
             hidden_internal_count += 1;
@@ -105,19 +128,58 @@ fn prepare_dashboard_data(raw_agents: &mut [AgentSummary]) -> DashboardData {
             continue;
         }
 
+        if let Some(pid) = pid {
+            visible_pids.insert(pid);
+        }
         agents.push(agent.clone());
+    }
+
+    for adapter in all_adapters() {
+        for detected in adapter.detect(procs) {
+            let detected_cmd = format!("{} {}", detected.name, detected.cmdline.join(" "));
+            if service_pids.contains(&detected.pid)
+                || visible_pids.contains(&detected.pid)
+                || is_internal_handoff_cmd(&detected_cmd.to_ascii_lowercase())
+            {
+                continue;
+            }
+
+            visible_pids.insert(detected.pid);
+            discovered_count += 1;
+            agents.push(AgentSummary {
+                id: 0,
+                kind: adapter.kind().as_str().to_string(),
+                pid: Some(detected.pid),
+                status: "detected".into(),
+                spawned_by: "process".into(),
+                pid_alive: true,
+                ..Default::default()
+            });
+        }
     }
 
     DashboardData {
         agents,
         stale_count,
         hidden_internal_count,
+        discovered_count,
         raw_count,
+        tracked_requests_seen,
+        tracked_429s_seen,
+        tracked_sampled_agents,
     }
 }
 
 fn is_internal_handoff_cmd(cmd: &str) -> bool {
     cmd.contains("handoff") && (cmd.contains(" daemon ") || cmd.contains(" proxy "))
+}
+
+fn read_service_pids() -> HashSet<i64> {
+    [daemon_pidfile(), proxy_pidfile()]
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect()
 }
 
 pub fn render(frame: &mut Frame, data: &DashboardData, handoffs: &[String]) {
@@ -155,7 +217,7 @@ pub fn render(frame: &mut Frame, data: &DashboardData, handoffs: &[String]) {
             .map(|a| {
                 Row::new(vec![
                     a.kind.clone(),
-                    format!("#{}", a.id),
+                    id_label(a),
                     a.pid.map(|p| p.to_string()).unwrap_or_default(),
                     state_label(a),
                     budget_label(a),
@@ -228,10 +290,11 @@ fn render_summary(data: &DashboardData) -> String {
 
     format!(
         "daemon connected | observer: {observer}\n\
-         live agents: {} | stale records hidden: {} | services hidden: {} | tracked records: {}\n\
+         live agents: {} | discovered now: {} | stale records hidden: {} | services hidden: {} | tracked records: {}\n\
          requests seen: {} | agents with rate samples: {} | 429s: {}\n\
          rate limits appear after Claude/Codex traffic goes through the Handsoff proxy",
         data.agents.len(),
+        data.discovered_count,
         data.stale_count,
         data.hidden_internal_count,
         data.raw_count,
@@ -246,6 +309,14 @@ fn state_label(agent: &AgentSummary) -> String {
         agent.status.clone()
     } else {
         "stale".to_string()
+    }
+}
+
+fn id_label(agent: &AgentSummary) -> String {
+    if agent.id > 0 {
+        format!("#{}", agent.id)
+    } else {
+        "live".to_string()
     }
 }
 
@@ -307,6 +378,14 @@ fn format_duration_value(delta: i64) -> String {
 mod tests {
     use super::*;
 
+    fn proc(pid: i64, name: &str, cmdline: &[&str]) -> ProcInfo {
+        ProcInfo {
+            pid,
+            name: name.into(),
+            cmdline: cmdline.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
     #[test]
     fn internal_handoff_processes_are_detected() {
         assert!(is_internal_handoff_cmd(
@@ -321,6 +400,37 @@ mod tests {
         let summary = render_summary(&DashboardData::default());
         assert!(summary.contains("waiting for first proxied provider response"));
         assert!(summary.contains("live agents: 0"));
+    }
+
+    #[test]
+    fn dashboard_merges_live_discovered_agents() {
+        let procs = vec![proc(10, "claude", &["/usr/local/bin/claude"])];
+        let mut agents = Vec::new();
+        let data = prepare_dashboard_data(&mut agents, &procs, &HashSet::new());
+        assert_eq!(data.agents.len(), 1);
+        assert_eq!(data.agents[0].kind, "claude");
+        assert_eq!(data.agents[0].status, "detected");
+        assert_eq!(data.discovered_count, 1);
+    }
+
+    #[test]
+    fn dashboard_hides_service_pid_even_when_record_kind_is_agent() {
+        let procs = vec![proc(99, "handoff", &["/usr/local/bin/handoff", "proxy"])];
+        let mut service_pids = HashSet::new();
+        service_pids.insert(99);
+        let mut agents = vec![AgentSummary {
+            id: 2,
+            kind: "claude".into(),
+            pid: Some(99),
+            status: "running".into(),
+            total_requests: 44,
+            ..Default::default()
+        }];
+
+        let data = prepare_dashboard_data(&mut agents, &procs, &service_pids);
+        assert!(data.agents.is_empty());
+        assert_eq!(data.hidden_internal_count, 1);
+        assert_eq!(data.observed_requests(), 44);
     }
 
     #[test]
