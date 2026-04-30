@@ -78,11 +78,14 @@ mkdir -p "$DIST"
 cp "$BIN" "$DIST/$ARTIFACT"
 chmod +x "$DIST/$ARTIFACT"
 
-if command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 "$DIST/$ARTIFACT" > "$DIST/$ARTIFACT.sha256"
-else
-  sha256sum "$DIST/$ARTIFACT" > "$DIST/$ARTIFACT.sha256"
-fi
+(
+  cd "$DIST"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$ARTIFACT" > "$ARTIFACT.sha256"
+  else
+    sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+  fi
+)
 
 echo "Built:"
 echo "  $DIST/$ARTIFACT"
