@@ -12,9 +12,15 @@ pub async fn fetch_handoffs(daemon_url: &str) -> anyhow::Result<Vec<String>> {
             match row["kind"].as_str().unwrap_or_default() {
                 "handoff" => {
                     let reason = row["reason"].as_str().unwrap_or("?");
-                    let from = row["from_agent_id"].as_i64().unwrap_or(0);
-                    let to = row["to_agent_id"].as_i64().unwrap_or(0);
-                    out.push(format!("handoff: agent #{from} -> #{to} ({reason})"));
+                    let from_str = row["from_agent_id"]
+                        .as_i64()
+                        .map(|id| format!("#{id}"))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let to_str = row["to_agent_id"]
+                        .as_i64()
+                        .map(|id| format!("#{id}"))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    out.push(format!("handoff: agent {from_str} -> {to_str} ({reason})"));
                 }
                 "agent_spawn" => {
                     let agent = row["agent_kind"].as_str().unwrap_or("agent");
